@@ -1,0 +1,23 @@
+# repos.conf — repositories monitored by claude-worklog
+#
+# The worklog repo itself (this repo) is always included automatically.
+# Add one line per additional repository your team uses.
+#
+# Format:  alias=absolute_path
+#
+# - alias: short name shown in session logs and day reports (no spaces)
+# - path:  absolute path to the repository root (must contain a .git folder)
+#
+# Examples (Windows):
+#   backend=C:\Users\yourname\Projects\my-backend
+#   frontend=C:\Users\yourname\Projects\my-frontend
+#   infra=C:\Users\yourname\Projects\my-infra
+#
+# Paths with spaces work without quoting:
+#   data-pipeline=C:\Users\Jane Doe\Projects\My Data Pipeline
+#
+# Examples (WSL/Linux):
+#   backend=/home/yourname/projects/my-backend
+#   frontend=/home/yourname/projects/my-frontend
+
+# Add your repositories below:

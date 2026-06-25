@@ -1,0 +1,27 @@
+# Active demand tracking (per-user, not shared)
+active_demands.txt
+current_demand.txt
+
+# Repository configuration (per-user paths)
+repos.conf
+
+# Demand content files (binary, large, or sensitive)
+worklogs/**/*.csv
+worklogs/**/*.xlsx
+worklogs/**/*.pdf
+worklogs/**/*.qvd
+worklogs/**/*.zip
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/settings.json
+*.swp
+*~
