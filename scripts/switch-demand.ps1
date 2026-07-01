@@ -1,50 +1,43 @@
 <#
 .SYNOPSIS
     Switches the active demand in the current Claude session without restarting Claude.
-    Locates the session_id from the most recent JSONL in the Claude project directory.
 
 .PARAMETER ticket
     Target demand ID. Example: "PROJ-456"
 
+.PARAMETER sessionId
+    session_id of the calling session. Claude SHOULD ALWAYS pass this, extracted from the UUID
+    of its own scratchpad directory (given in its system prompt, identical to the session_id
+    used by the hooks) -- it is the only reliable identifier when multiple Claude sessions run
+    concurrently on the same machine. Without it, the script falls back to a PID/flag heuristic
+    that can match a DIFFERENT, unrelated Claude session active at the same instant (confirmed
+    via live debugging, 2026-07-01).
+
 .EXAMPLE
-    .\switch-demand.ps1 -ticket "PROJ-456"
+    .\switch-demand.ps1 -ticket "PROJ-456" -sessionId "da9bd39f-cf6f-46e1-bd7b-dcad64db689f"
 #>
 param(
     [Parameter(Mandatory)]
-    [string]$ticket
+    [string]$ticket,
+    [string]$sessionId
 )
 
 $worklogRoot = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { $PSScriptRoot | Split-Path -Parent }
 $activeFile  = "$worklogRoot\active_demands.txt"
 
-# Locate session_id by walking the process tree to find the claude.exe PID
-# stored by the inject hook in the demand file (line 2)
-$sessionId = $null
-$checkPid  = $PID
-for ($hop = 0; $hop -lt 6 -and -not $sessionId; $hop++) {
-    $checkPid = try { (Get-CimInstance Win32_Process -Filter "ProcessId=$checkPid" -EA Stop).ParentProcessId } catch { 0 }
-    if (-not $checkPid) { break }
-    foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue)) {
-        $dfLines = @(Get-Content $df.FullName -Encoding utf8 -EA SilentlyContinue | Where-Object { $_.Trim() })
-        $dfPid   = if ($dfLines.Count -gt 1) { try { [int]$dfLines[1].Trim() } catch { 0 } } else { 0 }
-        if ($dfPid -gt 0 -and $dfPid -eq $checkPid) {
-            $sessionId = $df.BaseName -replace 'claude_demand_', ''
-            break
-        }
-    }
+# Fallback (sessionId not provided): most recently touched claude_active_{session_id}.flag.
+# FRAGILE HEURISTIC -- can match a DIFFERENT, unrelated Claude session active on the same
+# machine at the same instant. Only used when -sessionId was not passed (e.g. manual invocation
+# outside a Claude session).
+if (-not $sessionId) {
+    $activeFlags = @(Get-Item "$env:TEMP\claude_active_*.flag" -EA SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    if ($activeFlags.Count -gt 0) { $sessionId = $activeFlags[0].BaseName -replace 'claude_active_', '' }
 }
 
-# Fallback: most recent JSONL (less reliable with parallel sessions)
-if (-not $sessionId) {
-    $worklogDirName = Split-Path $worklogRoot -Leaf
-    $claudeProjectDir = (Get-ChildItem "$env:USERPROFILE\.claude\projects\" -Directory -EA SilentlyContinue |
-        Where-Object { $_.Name -like "*$worklogDirName*" } | Select-Object -First 1).FullName
-    if ($claudeProjectDir) {
-        $latestJsonl = Get-ChildItem "$claudeProjectDir\*.jsonl" -EA SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($latestJsonl) { $sessionId = $latestJsonl.BaseName }
-    }
-}
+# No JSONL-based fallback: "most recently modified jsonl in the project directory" can belong
+# to ANY Claude session in that same directory -- confirmed to cause cross-session state
+# corruption between real concurrent sessions (live debugging, 2026-07-01). Prefer failing loud
+# over silently guessing wrong. Always pass -sessionId explicitly.
 
 if (-not $sessionId) {
     Write-Host "ERROR: could not determine session_id for the current session." -ForegroundColor Red
@@ -52,11 +45,13 @@ if (-not $sessionId) {
 }
 $demandFile = "$env:TEMP\claude_demand_$sessionId.txt"
 
-# Read current ticket
+# Read current ticket and PID (line1=ticket, line2=claude.exe pid)
 $oldTicket = $null
+$existingPid = 0
 if (Test-Path $demandFile) {
-    $oldTicket = @(Get-Content $demandFile -Encoding utf8 | Where-Object { $_.Trim() })[0]
-    if ($oldTicket) { $oldTicket = $oldTicket.Trim() }
+    $dfLines = @(Get-Content $demandFile -Encoding utf8 -EA SilentlyContinue | Where-Object { $_.Trim() })
+    if ($dfLines.Count -gt 0) { $oldTicket = $dfLines[0].Trim() }
+    if ($dfLines.Count -gt 1) { try { $existingPid = [int]$dfLines[1].Trim() } catch { $existingPid = 0 } }
 }
 if (-not $oldTicket) { $oldTicket = "(unknown)" }
 
@@ -83,8 +78,8 @@ foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue))
     }
 }
 
-# Update demand file for this session
-Set-Content $demandFile -Value $ticket -Encoding utf8
+# Update demand file for this session -- preserve the existing PID (line 2), same format the inject hook writes
+Set-Content $demandFile -Value "$ticket`n$existingPid" -Encoding utf8
 
 # Update active_demands.txt: replace old ticket with new ticket
 if (Test-Path $activeFile) {

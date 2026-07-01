@@ -9,26 +9,22 @@ $worklogRoot = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else {
     Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 }
 
-# Read session_id from stdin (JSON sent by Claude Code) -- stable and identical to inject hook
+# Read session_id from stdin (JSON sent by Claude Code) -- stable and identical to inject hook.
+# Do NOT gate on [Console]::In.Peek() -- confirmed via live debugging (2026-07-01) that Peek()
+# can return -1 even when Claude Code does send JSON over stdin on this host.
 $sessionId = $null
-if ([Console]::In.Peek() -ne -1) {
-    try {
-        $hookInput = [Console]::In.ReadToEnd() | ConvertFrom-Json
+try {
+    $stdinContent = [Console]::In.ReadToEnd()
+    if ($stdinContent) {
+        $hookInput = $stdinContent | ConvertFrom-Json
         $sessionId = $hookInput.session_id
-    } catch {}
-}
-
-# Fallback: infer session_id from most recent JSONL in Claude project dir
-if (-not $sessionId) {
-    $worklogDirName = Split-Path $worklogRoot -Leaf
-    $claudeProjectDir = (Get-ChildItem "$env:USERPROFILE\.claude\projects\" -Directory -EA SilentlyContinue |
-        Where-Object { $_.Name -like "*$worklogDirName*" } | Select-Object -First 1).FullName
-    if ($claudeProjectDir) {
-        $latestJsonl = Get-ChildItem "$claudeProjectDir\*.jsonl" -EA SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($latestJsonl) { $sessionId = $latestJsonl.BaseName }
     }
-}
+} catch {}
+
+# No JSONL-based fallback: with multiple sessions sharing the same Claude project directory,
+# "most recently modified jsonl" can belong to ANY active session, not just the caller --
+# confirmed to cause cross-session state corruption (2026-07-01). Failing safe (skip cleanup
+# for this call) is preferable to silently guessing the wrong identity.
 
 # Session files keyed by session_id -- stable and identical in inject and Stop hooks
 $demandFile    = if ($sessionId) { "$env:TEMP\claude_demand_$sessionId.txt"  } else { $null }
@@ -169,19 +165,45 @@ if ($allFiles.Count -gt 0) {
 # If the flag exists: Stop fired after a normal response (mid-turn) -- remove flag, skip cleanup.
 # If the flag does not exist: Stop fired by /exit -- clean up markers and active_demands.txt.
 
-if ($activeFlag -and (Test-Path $activeFlag)) {
+# Retry before concluding absence: confirmed (2026-07-01, live debugging) that Test-Path can
+# fail transiently under heavy concurrent I/O in %TEMP% (multiple Claude sessions touching the
+# same files), making this hook treat mid-turn as /exit by mistake.
+$activeFlagExists = $activeFlag -and (Test-Path $activeFlag)
+if (-not $activeFlagExists -and $activeFlag) {
+    Start-Sleep -Milliseconds 150
+    $activeFlagExists = Test-Path $activeFlag
+}
+
+if ($activeFlagExists) {
     Remove-Item $activeFlag -Force -ErrorAction SilentlyContinue
 } else {
     $activeFile = "$worklogRoot\active_demands.txt"
-    if ((Test-Path $activeFile) -and $ticket) {
-        $lines = @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })
-        if ($lines.Count -gt 1) {
-            ($lines | Where-Object { $_.Trim() -ne $ticket }) | Set-Content $activeFile -Encoding utf8
+
+    # Same lock used by hook_context_inject.ps1 -- protects active_demands.txt and the
+    # claude_demand_*/claude_ctx_*/claude_active_* files against races between concurrent
+    # sessions (confirmed to cause real state corruption/loss, live debugging 2026-07-01).
+    $worklogMutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
+    $worklogMutexAcquired = $false
+    try {
+        try {
+            $worklogMutexAcquired = $worklogMutex.WaitOne(10000)
+        } catch [System.Threading.AbandonedMutexException] {
+            $worklogMutexAcquired = $true
         }
+
+        if ((Test-Path $activeFile) -and $ticket) {
+            $lines = @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })
+            if ($lines.Count -gt 1) {
+                ($lines | Where-Object { $_.Trim() -ne $ticket }) | Set-Content $activeFile -Encoding utf8
+            }
+        }
+        if ($sessionMarker) { Remove-Item $sessionMarker -Force -EA SilentlyContinue }
+        if ($demandFile)    { Remove-Item $demandFile    -Force -EA SilentlyContinue }
+        if ($activeFlag)    { Remove-Item $activeFlag    -Force -EA SilentlyContinue }
+    } finally {
+        if ($worklogMutexAcquired) { $worklogMutex.ReleaseMutex() }
+        $worklogMutex.Dispose()
     }
-    if ($sessionMarker) { Remove-Item $sessionMarker -Force -EA SilentlyContinue }
-    if ($demandFile)    { Remove-Item $demandFile    -Force -EA SilentlyContinue }
-    if ($activeFlag)    { Remove-Item $activeFlag    -Force -EA SilentlyContinue }
 }
 
 # Commit everything before pull -- prevents rebase failure from uncommitted files
