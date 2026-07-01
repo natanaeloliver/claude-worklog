@@ -75,8 +75,13 @@ Each entry must cover:
 
 ```powershell
 $wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
-& "$wl\scripts\switch-demand.ps1" -ticket "TICKET-123"
+& "$wl\scripts\switch-demand.ps1" -ticket "TICKET-123" -sessionId "SESSION_ID_FROM_SCRATCHPAD"
 ```
+
+**Always pass `-sessionId`** with the UUID from your own scratchpad directory (shown in your
+system prompt). Without it, the script falls back to a heuristic that can match a DIFFERENT,
+unrelated Claude session running on the same machine, silently switching the wrong session's
+demand (confirmed via live debugging, 2026-07-01).
 
 ## Management Commands
 
