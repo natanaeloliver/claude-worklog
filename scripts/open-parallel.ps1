@@ -49,6 +49,22 @@ if (Test-Path $activeFile) {
     Set-Content $activeFile -Value $ticket -Encoding utf8
 }
 
+# FIFO queue consumed by hook_context_inject.ps1 in the new session before it falls back to
+# scanning active_demands.txt -- without this, opening two parallels back-to-back could make the
+# second new session grab an old/orphaned ticket already sitting in the file instead of its own
+# reservation (real bug, worklog TSK-596, 2026-07-03). Same global mutex the hooks use protects
+# the append against a race with a concurrent read.
+$pendingFile = "$env:TEMP\claude_pending_open.txt"
+$mutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
+$mutexAcquired = $false
+try {
+    try { $mutexAcquired = $mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $mutexAcquired = $true }
+    Add-Content $pendingFile -Value $ticket -Encoding utf8
+} finally {
+    if ($mutexAcquired) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
+}
+
 Write-Host "Slot reserved for $ticket." -ForegroundColor Cyan
 
 if (-not $option) {

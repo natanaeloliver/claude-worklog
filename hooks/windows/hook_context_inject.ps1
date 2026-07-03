@@ -103,7 +103,22 @@ if (Test-Path $demandFile) {
     }
 }
 
-# 2. Fallback: active_demands.txt -- first ticket not claimed by another live session
+# 2. Fallback: open-parallel.ps1's FIFO reservation queue -- a brand-new session (no demand
+#    file of its own yet) claims the reservation made for it, in the order it was made. Without
+#    this, the generic active_demands.txt fallback below can grab an old/orphaned entry unrelated
+#    to this open (real bug, worklog TSK-596, 2026-07-03).
+$pendingFile = "$env:TEMP\claude_pending_open.txt"
+if (-not $ticket -and (Test-Path $pendingFile)) {
+    $pendingLines = @(Get-Content $pendingFile -Encoding utf8 -EA SilentlyContinue | Where-Object { $_.Trim() })
+    if ($pendingLines.Count -gt 0) {
+        $candidate = $pendingLines[0].Trim()
+        $remaining = @($pendingLines | Select-Object -Skip 1)
+        if ($remaining.Count -gt 0) { $remaining | Set-Content $pendingFile -Encoding utf8 } else { Remove-Item $pendingFile -Force -EA SilentlyContinue }
+        if ($candidate -and (Test-Path "$worklogRoot\worklogs\$candidate")) { $ticket = $candidate }
+    }
+}
+
+# 3. Fallback: active_demands.txt -- first ticket not claimed by another live session
 if (-not $ticket -and (Test-Path $activeFile)) {
     $claimedTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
         $dfSid = $_.BaseName -replace 'claude_demand_', ''
@@ -123,7 +138,7 @@ if (-not $ticket -and (Test-Path $activeFile)) {
     }
 }
 
-# 3. Legacy fallback: current_demand.txt
+# 4. Legacy fallback: current_demand.txt
 if (-not $ticket) {
     $legacyFile = "$worklogRoot\current_demand.txt"
     if (Test-Path $legacyFile) {
