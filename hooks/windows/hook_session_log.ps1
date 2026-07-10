@@ -52,7 +52,8 @@ $ticketDir  = "$worklogRoot\worklogs\$ticket"
 $sessionLog = "$ticketDir\session_log.md"
 if (-not (Test-Path $ticketDir)) { exit 0 }
 
-$gitUser = (git -C $worklogRoot config user.name 2>$null).Trim()
+$gitUser = (git -C $worklogRoot config user.name 2>$null)
+if ($gitUser) { $gitUser = $gitUser.Trim() }
 if (-not $gitUser) { $gitUser = $env:USERNAME }
 
 # Read monitored repos from repos.conf

@@ -1,4 +1,4 @@
-Create a new demand in the worklog system.
+﻿Create a new demand in the worklog system.
 
 Ask the user for the following if not already provided:
 1. **Ticket ID** — e.g., `PROJ-001`, `TSK-123`, `ISSUE-42`
@@ -10,7 +10,7 @@ Ask the user for the following if not already provided:
 Then run:
 
 ```powershell
-$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
 & "$wl\scripts\new-demand.ps1" -ticket "<TICKET_ID>" -name "<NAME>" -repos "<REPOS>" -sprint "<SPRINT>" -type "<TYPE>"
 ```
 

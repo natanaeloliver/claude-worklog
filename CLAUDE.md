@@ -1,4 +1,4 @@
-# CLAUDE.md — claude-worklog
+﻿# CLAUDE.md — claude-worklog
 
 This is the worklog hub. It is not a production codebase — it contains demand tracking,
 session logs, hooks, and management scripts.
@@ -9,13 +9,23 @@ The `UserPromptSubmit` hook injects the active demand's context automatically on
 message of each session. If the hook did not inject (stand-by or failure), read manually:
 
 ```powershell
-$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
 $t  = (Get-Content "$wl\active_demands.txt" -EA Stop | Select-Object -First 1).Trim()
 Get-Content "$wl\worklogs\$t\CONTEXT.md"
 ```
 
 **Stand-by:** if `active_demands.txt` is empty or missing, no context is injected — Claude
 works normally without demand context.
+
+## Working in Other Repositories
+
+The hooks in this repo are project-level (`.claude/settings.json`) — they only fire when
+Claude is opened here, in the hub. Code work in another repository happens via absolute path
+(Read/Edit/Bash), always from this hub session — never by opening `claude` physically inside
+that other repository. `repos.conf` maps aliases to absolute paths; use those paths directly.
+
+(If the user has set up `-Global` mode instead, the hooks also run inside their other repos
+directly — see README.md for that mode. Default assumption is hub-only unless told otherwise.)
 
 ## Token Efficiency
 
@@ -74,7 +84,7 @@ Each entry must cover:
 ## Switching Demands
 
 ```powershell
-$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
 & "$wl\scripts\switch-demand.ps1" -ticket "TICKET-123" -sessionId "SESSION_ID_FROM_SCRATCHPAD"
 ```
 
@@ -86,7 +96,7 @@ demand (confirmed via live debugging, 2026-07-01).
 ## Management Commands
 
 ```powershell
-$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
 
 # Create new demand
 & "$wl\scripts\new-demand.ps1" -ticket "PROJ-001" -name "Demand name" -sprint "Sprint2026.S11"

@@ -61,13 +61,16 @@ code repos.conf
 .\scripts\new-demand.ps1 -ticket "PROJ-001" -name "My first demand"
 ```
 
-**4. Open Claude** in any of your repositories:
+**4. Open Claude** inside this directory (the hub) — not inside your other repos:
 ```powershell
-cd C:\path\to\your\project
+cd C:\path\to\claude-worklog
 claude
 ```
 
-Claude will automatically read the demand context.
+Claude will automatically read the demand context, and reaches your other repositories via
+absolute paths (from `repos.conf`) using its normal Read/Edit/Bash tools — no need to `cd`
+into them yourself. See [Optional: multi-repo direct mode](#optional-multi-repo-direct-mode)
+if you'd rather open Claude directly inside each repo instead.
 
 ## Repository Structure
 
@@ -81,7 +84,7 @@ claude-worklog/
 ├── scripts/
 │   ├── new-demand.ps1                # Create a new demand
 │   ├── switch-demand.ps1             # Switch active demand mid-session
-│   ├── open-parallel.ps1             # Open parallel session in new tab
+│   ├── open-parallel.ps1             # Open parallel session in new window
 │   ├── standby.ps1                   # Clear active demand
 │   └── day-report.ps1                # Daily activity summary
 ├── templates/
@@ -136,7 +139,7 @@ To make them global (available in all repos), copy `.claude/commands/` to `~/.cl
 
 ## Parallel Sessions
 
-For more efficient work, you can open different demands simultaneously in separate terminal tabs:
+For more efficient work, you can open different demands simultaneously in separate terminal windows:
 
 ```powershell
 .\scripts\open-parallel.ps1 -ticket "PROJ-456"
@@ -157,14 +160,32 @@ backend=C:\Users\yourname\Projects\my-backend
 frontend=C:\Users\yourname\Projects\my-frontend
 ```
 
-These repos appear in session logs and the day report. The worklog repo itself is always
-included automatically.
+These repos appear in session logs and the day report — that's their only job. They're read
+via absolute path (`git diff`/`git log` against `$repoPath`), not opened as Claude sessions.
 
-### Adding CLAUDE.md to your team repos
+## Optional: multi-repo direct mode
 
-Copy `templates/CLAUDE.md.template` to each of your team's repositories as `CLAUDE.md`
-and fill in the project overview. This gives Claude repo-specific context alongside the
-demand context.
+By default, `claude-worklog` only configures project-level hooks (already shipped in
+`.claude/settings.json`), which fire when you open `claude` inside this directory. Claude then
+reads/edits your other repos via absolute paths from `repos.conf`, using its normal tools.
+
+If you'd rather open `claude` directly inside each of your repos instead (no need to stay in
+the hub), run:
+
+```powershell
+.\setup.ps1 -Global
+```
+
+This additionally registers the hooks in `~/.claude/settings.json`, so context injection
+fires no matter which repo you open Claude in. **Trade-off:** that's a global setting — it
+applies to every Claude Code project on the machine, not just this one, and can interact with
+hooks or settings other projects already have configured at the user level. Keep it project-level
+unless you specifically need to open Claude inside each repo.
+
+If you do use `-Global`, copy `templates/CLAUDE.md.template` to each of your team's
+repositories as `CLAUDE.md` and fill in the project overview — it tells Claude how to read the
+demand context manually if the hook doesn't fire, since it's no longer guaranteed to be running
+from inside the hub.
 
 ## Token Efficiency
 

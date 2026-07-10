@@ -1,4 +1,8 @@
-# CLAUDE.md — {REPO_NAME}
+﻿# CLAUDE.md — {REPO_NAME}
+
+> Only needed if you're using claude-worklog's optional `-Global` multi-repo mode (opening
+> `claude` directly inside this repo). In the default hub-only setup, Claude works on this
+> repo from inside the claude-worklog session via absolute paths, and doesn't need this file.
 
 This file provides guidance to Claude Code when working in this repository.
 
@@ -8,7 +12,7 @@ The `UserPromptSubmit` hook injects the active demand context automatically on t
 of each session. If the hook did not inject (stand-by or failure), read manually:
 
 ```powershell
-$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
 $t  = (Get-Content "$wl\active_demands.txt" -EA Stop | Select-Object -First 1).Trim()
 Get-Content "$wl\worklogs\$t\CONTEXT.md"
 ```
@@ -18,7 +22,7 @@ Get-Content "$wl\worklogs\$t\CONTEXT.md"
 ## Switching Demands
 
 ```powershell
-$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
 & "$wl\scripts\switch-demand.ps1" -ticket "TICKET-123" -sessionId "SESSION_ID_FROM_SCRATCHPAD"
 ```
 

@@ -1,9 +1,9 @@
-Show the daily activity summary for the worklog.
+﻿Show the daily activity summary for the worklog.
 
 Run:
 
 ```powershell
-$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
 & "$wl\scripts\day-report.ps1"
 ```
 

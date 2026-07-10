@@ -54,4 +54,4 @@ if ($previous) {
 } else {
     Write-Host "Stand-by activated." -ForegroundColor Cyan
 }
-Write-Host "To resume: use 'switch demand' in Claude or open a new tab." -ForegroundColor Gray
+Write-Host "To resume: use 'switch demand' in Claude or open a new window." -ForegroundColor Gray

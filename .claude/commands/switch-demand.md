@@ -1,4 +1,4 @@
-Switch the active demand in the current Claude session without restarting.
+﻿Switch the active demand in the current Claude session without restarting.
 
 Ask the user for the **ticket ID** to switch to (e.g., `PROJ-456`).
 
@@ -7,7 +7,7 @@ in your system prompt) -- without it, the script may match a different, unrelate
 session running on the same machine:
 
 ```powershell
-$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
 & "$wl\scripts\switch-demand.ps1" -ticket "<TICKET_ID>" -sessionId "<YOUR_SCRATCHPAD_UUID>"
 ```
 

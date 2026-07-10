@@ -63,11 +63,17 @@ cd claude-worklog
 
 This script:
 1. Adds `$env:WORKLOG_PATH` to your PowerShell profile (`$PROFILE.CurrentUserAllHosts`)
-2. Writes the two hooks to `~\.claude\settings.json`:
-   - `UserPromptSubmit` → `hook_context_inject.ps1`
-   - `Stop` → `hook_session_log.ps1`
+2. Confirms the project-level hooks (already shipped in `.claude\settings.json`) — no global
+   change needed. They fire whenever you open `claude` inside this directory.
 3. Creates `active_demands.txt` and `current_demand.txt`
 4. Copies `repos.conf.example` to `repos.conf`
+
+**Prefer opening Claude directly inside each of your repos instead of staying in the hub?**
+Run `.\setup.ps1 -Global` instead — it additionally writes the two hooks to
+`~\.claude\settings.json` (`UserPromptSubmit` → `hook_context_inject.ps1`, `Stop` →
+`hook_session_log.ps1`), which is a machine-wide setting affecting every Claude Code project,
+not just this one. See [README.md — Optional: multi-repo direct mode](README.md#optional-multi-repo-direct-mode)
+before choosing this.
 
 ---
 
@@ -101,9 +107,13 @@ These repos appear in session logs and the day report.
 
 ---
 
-## Step 5 — Add CLAUDE.md to your team repos (optional but recommended)
+## Step 5 — Add CLAUDE.md to your team repos (only if using `-Global`)
 
-Copy the template to each repository:
+Skip this step if you're on the default hub-only setup — Claude already has repo context via
+`repos.conf` and reads/edits those repos from within the hub session.
+
+If you ran `.\setup.ps1 -Global` and open Claude directly inside each repo, copy the template
+so Claude still has repo-specific context there:
 
 ```powershell
 Copy-Item "$env:WORKLOG_PATH\templates\CLAUDE.md.template" "C:\path\to\your\repo\CLAUDE.md"
@@ -144,15 +154,17 @@ code "$env:WORKLOG_PATH\worklogs\PROJ-001\CONTEXT.md"
 
 ## Step 8 — Verify the setup
 
-Open Claude in any of your repositories:
+Open Claude inside the hub:
 
 ```powershell
-cd C:\path\to\your\project
+cd $env:WORKLOG_PATH
 claude
 ```
 
 On your first message, Claude should acknowledge the active demand context (injected by
 the `UserPromptSubmit` hook). If not, check the troubleshooting section below.
+
+If you set up `-Global` mode, repeat this check from inside one of your other repos instead.
 
 ---
 
@@ -182,8 +194,10 @@ Get-ChildItem "$env:WORKLOG_PATH\worklogs\" -Directory
 
 **Context not injected at session start**
 - Check that `active_demands.txt` has a demand listed: `Get-Content "$env:WORKLOG_PATH\active_demands.txt"`
-- Verify the hook is in `~\.claude\settings.json` under `UserPromptSubmit`
-- Confirm the hook script path in settings.json is correct and the file exists
+- Default (hub-only): verify you opened `claude` inside `$env:WORKLOG_PATH`, and that the hook
+  is in this repo's `.claude\settings.json` under `UserPromptSubmit`
+- `-Global` mode: verify the hook is in `~\.claude\settings.json` under `UserPromptSubmit`
+  instead, and that the hook script path in settings.json is correct and the file exists
 
 **Session log not updated after closing Claude**
 - The `Stop` hook only fires when Claude exits cleanly (via `/exit`)
@@ -204,17 +218,21 @@ Get-ChildItem "$env:WORKLOG_PATH\worklogs\" -Directory
 
 ```
 Morning
-  └─ Open terminal → cd to your project → claude
+  └─ Open terminal → cd to the hub (claude-worklog) → claude
      └─ Claude reads CONTEXT.md automatically
 
 During the day
-  └─ Work normally — Claude has the demand context
+  └─ Work normally — ask Claude to read/edit files in your other repos by absolute path
+     (from repos.conf); it never needs you to cd into them
   └─ Use /switch-demand if you need to move to another ticket
 
 End of day
   └─ Tell Claude what was done today (it will write session_log.md)
   └─ /exit → hook syncs everything to git automatically
 ```
+
+(Running `-Global` mode instead? Replace "cd to the hub" with "cd to whichever repo you're
+working in" — the hook fires the same way either place.)
 
 ---
 

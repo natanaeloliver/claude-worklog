@@ -1,23 +1,17 @@
 <#
 .SYNOPSIS
-    Opens a parallel demand in a new Windows Terminal tab or window.
+    Opens a parallel demand in a new Windows Terminal window.
     Reserves the slot in active_demands.txt and starts Claude automatically.
 
 .PARAMETER ticket
     Demand ID to open in the new session. Example: "PROJ-456"
 
-.PARAMETER option
-    "1" = new tab (default), "2" = new window
-
 .EXAMPLE
     .\open-parallel.ps1 -ticket "PROJ-456"
-    .\open-parallel.ps1 -ticket "PROJ-456" -option 2
 #>
 param(
     [Parameter(Mandatory)]
-    [string]$ticket,
-    [ValidateSet("1","2")]
-    [string]$option
+    [string]$ticket
 )
 
 $worklogRoot = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { $PSScriptRoot | Split-Path -Parent }
@@ -67,14 +61,15 @@ try {
 
 Write-Host "Slot reserved for $ticket." -ForegroundColor Cyan
 
-if (-not $option) {
-    $option = Read-Host "Open in (1) new tab or (2) new window? [1/2]"
+if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
+    Write-Host "Windows Terminal (wt) not found. Open a new window yourself and run:" -ForegroundColor Red
+    Write-Host "  cd `"$worklogRoot`"; claude" -ForegroundColor Yellow
+    exit 1
 }
 
 # --startingDirectory sets CWD without needing Set-Location
 # -Command claude starts Claude directly (same as typing 'claude' in the terminal)
-if ($option -eq "2") {
-    & wt -w new --startingDirectory $worklogRoot powershell.exe -NoLogo -NoExit -Command claude
-} else {
-    & wt new-tab --startingDirectory $worklogRoot powershell.exe -NoLogo -NoExit -Command claude
-}
+# Always a new window: `wt new-tab` only attaches to a window wt can identify as the caller's
+# own, which isn't reliably available in this context -- it silently fell back to opening a new
+# window anyway, so there was never really a tab option in practice.
+& wt -w new --startingDirectory $worklogRoot powershell.exe -NoLogo -NoExit -Command claude

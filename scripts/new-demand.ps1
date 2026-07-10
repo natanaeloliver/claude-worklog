@@ -58,7 +58,8 @@ if (Test-Path $contextFile) {
 New-Item -ItemType Directory -Force -Path $demandDir | Out-Null
 
 if (-not $owner) {
-    $owner = (git -C $worklogRoot config user.name 2>$null).Trim()
+    $owner = (git -C $worklogRoot config user.name 2>$null)
+    if ($owner) { $owner = $owner.Trim() }
     if (-not $owner) { $owner = $env:USERNAME }
 }
 
@@ -68,7 +69,7 @@ $content = Get-Content $templateFile -Raw -Encoding utf8
 $reposList = if ($repos) {
     ($repos -split ',\s*' | Where-Object { $_ } | ForEach-Object { "- $_" }) -join "`n"
 } else {
-    "- (none specified — see repos.conf)"
+    "- (none specified, see repos.conf)"
 }
 
 $content = $content `
@@ -79,7 +80,8 @@ $content = $content `
     -replace '\{OWNER\}',        $owner `
     -replace '\{DATE_CREATED\}', $dateCreated `
     -replace '\{REPOSITORIES\}', $reposList `
-    -replace '\{DESCRIPTION\}',  "TODO: describe the demand in 2-3 lines."
+    -replace '\{DESCRIPTION\}',  "TODO: describe the demand in 2-3 lines." `
+    -replace '\{NEXT_ACTION\}',  "TODO: define the first next step"
 
 Set-Content -Path $contextFile -Value $content -Encoding utf8
 Set-Content -Path $currentFile -Value $ticket  -Encoding utf8

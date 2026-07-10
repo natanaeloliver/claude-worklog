@@ -1,9 +1,9 @@
-Put Claude Code in stand-by mode — clear the active demand so no context is injected in future sessions.
+﻿Put Claude Code in stand-by mode — clear the active demand so no context is injected in future sessions.
 
 Run:
 
 ```powershell
-$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\GitHub\claude-worklog" }
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
 & "$wl\scripts\standby.ps1"
 ```
 

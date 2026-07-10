@@ -84,8 +84,8 @@ try {
     # making Test-SessionAlive conclude "dead" for a live session with a marker minutes old.
     # Only retries when the first read fails (extra cost only on the rare "looks dead" path).
     function Test-SessionAlive {
-        param([int]$pid, [string]$markerPath)
-        if ($pid -gt 0 -and ($null -ne (Get-Process -Id $pid -EA SilentlyContinue))) { return $true }
+        param([int]$targetPid, [string]$markerPath)
+        if ($targetPid -gt 0 -and ($null -ne (Get-Process -Id $targetPid -EA SilentlyContinue))) { return $true }
         if (Test-Path $markerPath) { return ((Get-Date) - (Get-Item $markerPath).LastWriteTime).TotalHours -lt 24 }
         Start-Sleep -Milliseconds 150
         if (Test-Path $markerPath) { return ((Get-Date) - (Get-Item $markerPath).LastWriteTime).TotalHours -lt 24 }
