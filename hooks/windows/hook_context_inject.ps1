@@ -37,7 +37,12 @@ $sessionMarker = "$env:TEMP\claude_ctx_$sessionId.marker"
 $activeFlag    = "$env:TEMP\claude_active_$sessionId.flag"
 $demandFile    = "$env:TEMP\claude_demand_$sessionId.txt"
 
-# Update activeFlag on every message -- Stop hook uses it to detect mid-turn vs /exit
+# activeFlag = continuous heartbeat (touched on every message, never removed by the Stop hook --
+# which fires every turn but only logs+syncs, without touching session state, since 2026-07-14).
+# Used by Test-SessionAlive (here, switch-demand.ps1, open-parallel.ps1) to know whether ANOTHER
+# session is alive. Real state cleanup (demand file, sessionMarker, activeFlag, active_demands.txt)
+# happens exactly once, at the true /exit, in hook_session_end.ps1 (SessionEnd event) -- see
+# settings.json.
 New-Item -ItemType File -Path $activeFlag -Force | Out-Null
 
 # Re-injection guard: if marker exists and is less than 24h old, not the first message
@@ -83,8 +88,10 @@ try {
     # guard, not a liveness signal, so a session dead for hours (crashed/closed without /exit)
     # was being reported as alive for up to 24h -- real bug, caused ghost sessions blocking
     # tickets and a duplicate entry in active_demands.txt during rapid open/close cycles
-    # (found 2026-07-13). activeFlag is touched on every message and removed by the Stop hook
-    # (both mid-turn and /exit paths), so its age reflects actual last activity.
+    # (found 2026-07-13). activeFlag is a continuous heartbeat: touched on every message by this
+    # hook and NEVER removed by the Stop hook (which only logs+syncs since 2026-07-14) -- it is
+    # only removed at the true /exit, by hook_session_end.ps1 (SessionEnd event), so its age
+    # reflects actual last activity.
     # Retry on Test-Path: confirmed via live debugging (2026-07-01) that a single read can fail
     # transiently under heavy concurrent I/O (multiple sessions touching the same %TEMP% files),
     # making Test-SessionAlive conclude "dead" for a live session with a flag minutes old.
