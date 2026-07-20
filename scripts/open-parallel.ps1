@@ -71,6 +71,25 @@ if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
+# Claude Code injects runtime markers into its subprocesses' environment (NO_COLOR, AI_AGENT,
+# CLAUDECODE, CLAUDE_CODE_*, ...). Since this script runs INSIDE a Claude session, wt propagates
+# them to the new window and the child Claude reads them as a nested/agent session: colors are
+# disabled (washed-out white logo) and interactive mode is degraded (no plan/auto mode). Clearing
+# them here makes the parallel window start like a terminal opened by hand.
+# CLAUDE_CONFIG_DIR is preserved on purpose (it does not match the CLAUDE_CODE_* glob): it is
+# configuration, not a runtime marker, so wiping it would silently switch profiles.
+# The exact marker set varies by context -- NO_COLOR is not always present -- so clear the list
+# unconditionally rather than probing.
+$env:NO_COLOR            = $null
+$env:AI_AGENT            = $null
+$env:CLAUDECODE          = $null
+$env:CLAUDE_PID          = $null
+$env:GIT_EDITOR          = $null
+$env:GIT_TERMINAL_PROMPT = $null
+foreach ($e in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'CLAUDE_CODE_*' })) {
+    Remove-Item "Env:$($e.Name)" -ErrorAction SilentlyContinue
+}
+
 # --startingDirectory sets CWD without needing Set-Location
 # -Command claude starts Claude directly (same as typing 'claude' in the terminal)
 # Always a new window: `wt new-tab` only attaches to a window wt can identify as the caller's
