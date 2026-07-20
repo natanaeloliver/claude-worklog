@@ -70,9 +70,9 @@ foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue))
     $dfTicket = if ($dfLines.Count -gt 0) { $dfLines[0].Trim() } else { '' }
     if ($dfTicket -ne $ticket) { continue }
     $dfPid    = if ($dfLines.Count -gt 1) { try { [int]$dfLines[1].Trim() } catch { 0 } } else { 0 }
-    $dfMarker = "$env:TEMP\claude_ctx_$dfSid.marker"
+    $dfFlag   = "$env:TEMP\claude_active_$dfSid.flag"
     $isAlive  = ($dfPid -gt 0 -and ($null -ne (Get-Process -Id $dfPid -EA SilentlyContinue))) -or
-                ((Test-Path $dfMarker) -and ((Get-Date) - (Get-Item $dfMarker).LastWriteTime).TotalHours -lt 24)
+                ((Test-Path $dfFlag) -and ((Get-Date) - (Get-Item $dfFlag).LastWriteTime).TotalMinutes -lt 30)
     if ($isAlive) {
         $conflictWarning = "WARNING: $ticket is already active in another session ($dfSid). Simultaneous edits to CONTEXT.md or session_log.md may cause git conflicts."
     }
@@ -81,14 +81,31 @@ foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue))
 # Update demand file for this session -- preserve the existing PID (line 2), same format the inject hook writes
 Set-Content $demandFile -Value "$ticket`n$existingPid" -Encoding utf8
 
-# Update active_demands.txt: replace old ticket with new ticket
-if (Test-Path $activeFile) {
-    $lines   = @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })
-    $updated = @($lines | ForEach-Object { if ($_.Trim() -eq $oldTicket) { $ticket } else { $_ } })
-    if ($ticket -notin @($updated | ForEach-Object { $_.Trim() })) { $updated = @($updated) + @($ticket) }
-    $updated | Set-Content $activeFile -Encoding utf8
-} else {
-    Set-Content $activeFile -Value $ticket -Encoding utf8
+# Update active_demands.txt: replace old ticket with new ticket.
+# Same global mutex used by hook_context_inject.ps1/hook_session_end.ps1 -- without it, a
+# concurrent write (e.g. a hook from another session running at the same instant) can duplicate
+# or drop entries (real bug: TSK-2276 duplicated in active_demands.txt, worklog TSK-596,
+# 2026-07-14). Select-Object -Unique added as a second layer of defense.
+$worklogMutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
+$worklogMutexAcquired = $false
+try {
+    try {
+        $worklogMutexAcquired = $worklogMutex.WaitOne(10000)
+    } catch [System.Threading.AbandonedMutexException] {
+        $worklogMutexAcquired = $true
+    }
+
+    if (Test-Path $activeFile) {
+        $lines   = @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })
+        $updated = @($lines | ForEach-Object { if ($_.Trim() -eq $oldTicket) { $ticket } else { $_ } } | Select-Object -Unique)
+        if ($ticket -notin @($updated | ForEach-Object { $_.Trim() })) { $updated = @($updated) + @($ticket) }
+        $updated | Set-Content $activeFile -Encoding utf8
+    } else {
+        Set-Content $activeFile -Value $ticket -Encoding utf8
+    }
+} finally {
+    if ($worklogMutexAcquired) { $worklogMutex.ReleaseMutex() }
+    $worklogMutex.Dispose()
 }
 
 Write-Host "Demand switched: $oldTicket -> $ticket" -ForegroundColor Cyan

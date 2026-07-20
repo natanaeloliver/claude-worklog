@@ -37,7 +37,12 @@ $sessionMarker = "$env:TEMP\claude_ctx_$sessionId.marker"
 $activeFlag    = "$env:TEMP\claude_active_$sessionId.flag"
 $demandFile    = "$env:TEMP\claude_demand_$sessionId.txt"
 
-# Update activeFlag on every message -- Stop hook uses it to detect mid-turn vs /exit
+# activeFlag = continuous heartbeat (touched on every message, never removed by the Stop hook --
+# which fires every turn but only logs+syncs, without touching session state, since 2026-07-14).
+# Used by Test-SessionAlive (here, switch-demand.ps1, open-parallel.ps1) to know whether ANOTHER
+# session is alive. Real state cleanup (demand file, sessionMarker, activeFlag, active_demands.txt)
+# happens exactly once, at the true /exit, in hook_session_end.ps1 (SessionEnd event) -- see
+# settings.json.
 New-Item -ItemType File -Path $activeFlag -Force | Out-Null
 
 # Re-injection guard: if marker exists and is less than 24h old, not the first message
@@ -78,17 +83,25 @@ try {
         }
     }
 
-    # Helper: session is alive if claude.exe is still running OR marker exists and is recent (<24h).
+    # Helper: session is alive if claude.exe is still running OR activeFlag exists and is recent
+    # (<30min). Uses activeFlag, not sessionMarker: the marker is a once-per-24h re-injection
+    # guard, not a liveness signal, so a session dead for hours (crashed/closed without /exit)
+    # was being reported as alive for up to 24h -- real bug, caused ghost sessions blocking
+    # tickets and a duplicate entry in active_demands.txt during rapid open/close cycles
+    # (found 2026-07-13). activeFlag is a continuous heartbeat: touched on every message by this
+    # hook and NEVER removed by the Stop hook (which only logs+syncs since 2026-07-14) -- it is
+    # only removed at the true /exit, by hook_session_end.ps1 (SessionEnd event), so its age
+    # reflects actual last activity.
     # Retry on Test-Path: confirmed via live debugging (2026-07-01) that a single read can fail
     # transiently under heavy concurrent I/O (multiple sessions touching the same %TEMP% files),
-    # making Test-SessionAlive conclude "dead" for a live session with a marker minutes old.
+    # making Test-SessionAlive conclude "dead" for a live session with a flag minutes old.
     # Only retries when the first read fails (extra cost only on the rare "looks dead" path).
     function Test-SessionAlive {
-        param([int]$targetPid, [string]$markerPath)
+        param([int]$targetPid, [string]$flagPath)
         if ($targetPid -gt 0 -and ($null -ne (Get-Process -Id $targetPid -EA SilentlyContinue))) { return $true }
-        if (Test-Path $markerPath) { return ((Get-Date) - (Get-Item $markerPath).LastWriteTime).TotalHours -lt 24 }
+        if (Test-Path $flagPath) { return ((Get-Date) - (Get-Item $flagPath).LastWriteTime).TotalMinutes -lt 30 }
         Start-Sleep -Milliseconds 150
-        if (Test-Path $markerPath) { return ((Get-Date) - (Get-Item $markerPath).LastWriteTime).TotalHours -lt 24 }
+        if (Test-Path $flagPath) { return ((Get-Date) - (Get-Item $flagPath).LastWriteTime).TotalMinutes -lt 30 }
         return $false
     }
 
@@ -125,8 +138,8 @@ if (-not $ticket -and (Test-Path $activeFile)) {
         if ($dfSid -eq $sessionId) { return }
         $dfData = Read-DemandFile $_.FullName
         if (-not $dfData.Ticket) { return }
-        $dfMarker = "$env:TEMP\claude_ctx_$dfSid.marker"
-        if (-not (Test-SessionAlive $dfData.Pid $dfMarker)) { return }
+        $dfFlag = "$env:TEMP\claude_active_$dfSid.flag"
+        if (-not (Test-SessionAlive $dfData.Pid $dfFlag)) { return }
         $dfData.Ticket
     } | Where-Object { $_ })
 
@@ -170,22 +183,22 @@ foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue))
     if ($dfSid -eq $sessionId) { continue }
     $dfData = Read-DemandFile $df.FullName
     if ($dfData.Ticket -ne $ticket) { continue }
-    $dfMarker = "$env:TEMP\claude_ctx_$dfSid.marker"
-    if (-not (Test-SessionAlive $dfData.Pid $dfMarker)) { continue }
+    $dfFlag = "$env:TEMP\claude_active_$dfSid.flag"
+    if (-not (Test-SessionAlive $dfData.Pid $dfFlag)) { continue }
     $conflictWarning = "HOOK WARNING: $ticket is already open in another session ($dfSid). Editing CONTEXT.md or session_log.md simultaneously may cause git conflicts."
     break
 }
 
-# Clean up orphan demand files (dead process or expired marker)
+# Clean up orphan demand files (dead process or expired activeFlag)
 foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue)) {
     $dfSid = $df.BaseName -replace 'claude_demand_', ''
     if ($dfSid -eq $sessionId) { continue }
     $dfData = Read-DemandFile $df.FullName
-    $dfMarker = "$env:TEMP\claude_ctx_$dfSid.marker"
-    if (Test-SessionAlive $dfData.Pid $dfMarker) { continue }
+    $dfFlag = "$env:TEMP\claude_active_$dfSid.flag"
+    if (Test-SessionAlive $dfData.Pid $dfFlag) { continue }
     $orphanTicket = $dfData.Ticket
     Remove-Item $df.FullName -Force -EA SilentlyContinue
-    Remove-Item $dfMarker -Force -EA SilentlyContinue
+    Remove-Item "$env:TEMP\claude_ctx_$dfSid.marker" -Force -EA SilentlyContinue
     Remove-Item "$env:TEMP\claude_active_$dfSid.flag" -Force -EA SilentlyContinue
     if ($orphanTicket -and (Test-Path $activeFile)) {
         $liveTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
