@@ -19,5 +19,29 @@
 # Examples (WSL/Linux):
 #   backend=/home/yourname/projects/my-backend
 #   frontend=/home/yourname/projects/my-frontend
+#
+# ---------------------------------------------------------------------------
+# Per-repository preference:  alias.worktree=yes|no
+#
+# Does this repository use a git worktree per demand, or does the work happen in the main copy on a
+# branch named after the demand?
+#
+#   yes  work goes in a worktree under worklogs/<TICKET>/<alias>/
+#   no   work goes in the main copy, on a branch named after the demand
+#
+# A fresh worktree is an empty working directory: everything git does not track has to be rebuilt
+# there -- dependencies (node_modules, virtualenv), local .env files, generated clients, seeded local
+# databases. For a small repository that costs seconds; for an application repository it is a full
+# reinstall and reconfiguration on every demand, which is rework. That is why the answer belongs to
+# each repository, and often to each machine.
+#
+# Leave the line out and Claude asks once, the first time it needs to change that repository for a
+# demand, then records the answer here so it never asks again. To set or read it by hand:
+#   .\scripts\repo-worktree.ps1 -Alias backend -Use no
+#   .\scripts\repo-worktree.ps1                       # list all
+#
+#   backend=C:\Users\yourname\Projects\my-backend
+#   backend.worktree=no
+# ---------------------------------------------------------------------------
 
 # Add your repositories below:

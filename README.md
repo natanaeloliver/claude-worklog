@@ -69,6 +69,27 @@ per-demand branch or worktree, no uncommitted-files block is written**. The hook
 the day's section in `session_log.md`; that section is the record of what was done, written by you,
 and `day-report.ps1` flags demands that have commits but no entry.
 
+### Worktree per demand is optional, per repository
+
+Using a git worktree per demand lets you work on several demands in parallel without stashing, and
+keeps the main copy on a stable branch. But a fresh worktree is an empty working directory:
+everything git does not track has to be rebuilt there — dependencies, local `.env` files, generated
+clients, seeded local databases. For a small repository that costs seconds; for an application
+repository it is a full reinstall and reconfiguration on every demand, which is rework.
+
+So the choice belongs to each repository. Claude asks once, the first time it needs to change a given
+repository for a demand, and records the answer in `repos.conf`:
+
+```powershell
+.\scripts\repo-worktree.ps1                        # list every repo and its preference
+.\scripts\repo-worktree.ps1 -Alias backend         # -> yes | no | ask
+.\scripts\repo-worktree.ps1 -Alias backend -Use no # record it (stops the question repeating)
+```
+
+`ask` means not answered yet. `no` means work happens in the main copy on a branch named after the
+demand — which the `Stop` hook recognizes as evidence just as well as a worktree, so the audit trail
+works either way.
+
 ## Quick Start
 
 **Prerequisites:** [Claude Code](https://code.claude.com), PowerShell 5.1+, Git
@@ -117,7 +138,9 @@ claude-worklog/
 │   ├── open-parallel.ps1             # Open parallel session in new window
 │   ├── standby.ps1                   # Clear active demand
 │   ├── day-report.ps1                # Daily activity summary
-│   └── active_demands_lib.ps1        # Shared state read/write (self-healing + atomic)
+│   ├── repo-worktree.ps1             # Per-repo worktree preference (asked once)
+│   ├── active_demands_lib.ps1        # Shared state read/write (self-healing + atomic)
+│   └── repos_lib.ps1                 # repos.conf read/write (paths + preferences)
 ├── tests/
 │   └── test-demand-resolution.ps1    # 25 checks in an isolated sandbox
 ├── templates/

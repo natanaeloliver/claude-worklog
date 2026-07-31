@@ -233,6 +233,8 @@ Morning
 During the day
   └─ Work normally — ask Claude to read/edit files in your other repos by absolute path
      (from repos.conf); it never needs you to cd into them
+  └─ The first time Claude changes a given repo for a demand, it asks once whether that repo
+     uses a worktree per demand; the answer is recorded in repos.conf and never asked again
   └─ Use /switch-demand if you need to move to another ticket
 
 End of day
@@ -251,6 +253,6 @@ working in" — the hook fires the same way either place.)
 |------|---------|
 | `active_demands.txt` | Demands with a live session **right now** — ephemeral, empties when the sessions end (gitignored, per-user) |
 | `last_demand.txt` | **Resume point** — last demand ended or created; this is what makes the first session of the day open with context (gitignored, per-user) |
-| `repos.conf` | Your local repository paths (gitignored, per-user) |
+| `repos.conf` | Your local repository paths **and per-repo preferences** such as `alias.worktree=yes\|no` (gitignored, per-user) |
 | `worklogs/{TICKET}/CONTEXT.md` | Demand state — read by Claude at session start |
 | `worklogs/{TICKET}/session_log.md` | Audit trail — written by Claude + hooks |

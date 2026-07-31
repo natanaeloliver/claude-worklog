@@ -97,6 +97,36 @@ Each entry must cover:
 | Next steps | Files consulted during investigation |
 | Artifact status by repository | Approaches that didn't work and why |
 
+## Worktree per demand — optional, decided per repository
+
+Before making the **first change** to a registered repository for the current demand, check that
+repository's preference:
+
+```powershell
+$wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
+& "$wl\scripts\repo-worktree.ps1" -Alias "backend"    # -> yes | no | ask
+```
+
+| Answer | What to do |
+|---|---|
+| `yes` | create/use a worktree at `worklogs/<TICKET>/<alias>/`, branch named after the demand |
+| `no` | work in the main copy, on a branch named after the demand |
+| `ask` | **ask the user once**, then record the answer (below) and follow it |
+
+When the answer is `ask`, put the question to the user in terms of cost, not preference — something
+like: *"does `backend` use a worktree per demand, or should I work in the main copy on a demand
+branch? A fresh worktree starts empty, so anything git does not track has to be rebuilt there
+(dependencies, local `.env`, generated clients, seeded database)."* Then record it:
+
+```powershell
+& "$wl\scripts\repo-worktree.ps1" -Alias "backend" -Use no
+```
+
+Recording is what stops the question from repeating — never ask twice for the same repository, and
+never assume a default when the answer is `ask`. The answer is stored in `repos.conf`, which is
+gitignored and per-user, because the cost of a fresh worktree depends on the machine as much as on
+the repository.
+
 ## Switching Demands
 
 ```powershell
