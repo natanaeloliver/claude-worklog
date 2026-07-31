@@ -22,24 +22,10 @@ $today       = Get-Date -Format 'yyyy-MM-dd'
 $isToday     = (-not $Date)
 if (-not $Date) { $Date = $today }
 
-# Read monitored repos from repos.conf
-function Read-ReposConf {
-    param([string]$confPath)
-    $result = [ordered]@{}
-    if (-not (Test-Path $confPath)) { return $result }
-    foreach ($line in Get-Content $confPath -Encoding utf8) {
-        $line = $line.Trim()
-        if (-not $line -or $line.StartsWith('#')) { continue }
-        $idx = $line.IndexOf('=')
-        if ($idx -lt 0) { continue }
-        $alias = $line.Substring(0, $idx).Trim()
-        $path  = $line.Substring($idx + 1).Trim()
-        if ($alias -and $path) { $result[$alias] = $path }
-    }
-    return $result
-}
+. "$PSScriptRoot\repos_lib.ps1"   # Get-Repos (alias, path, per-repo worktree preference)
 
-$repos = Read-ReposConf "$worklogRoot\repos.conf"
+$repos = [ordered]@{}
+foreach ($repo in @(Get-Repos -ConfPath "$worklogRoot\repos.conf")) { $repos[$repo.Alias] = $repo.Path }
 $repos["worklog"] = $worklogRoot
 
 $gitUser = (git -C $worklogRoot config user.name 2>$null)

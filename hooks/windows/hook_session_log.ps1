@@ -60,22 +60,7 @@ $gitUser = (git -C $worklogRoot config user.name 2>$null)
 if ($gitUser) { $gitUser = $gitUser.Trim() }
 if (-not $gitUser) { $gitUser = $env:USERNAME }
 
-# Read monitored repos from repos.conf
-function Read-ReposConf {
-    param([string]$confPath)
-    $result = [ordered]@{}
-    if (-not (Test-Path $confPath)) { return $result }
-    foreach ($line in Get-Content $confPath -Encoding utf8) {
-        $line = $line.Trim()
-        if (-not $line -or $line.StartsWith('#')) { continue }
-        $idx = $line.IndexOf('=')
-        if ($idx -lt 0) { continue }
-        $alias = $line.Substring(0, $idx).Trim()
-        $path  = $line.Substring($idx + 1).Trim()
-        if ($alias -and $path) { $result[$alias] = $path }
-    }
-    return $result
-}
+. "$worklogRoot\scripts\repos_lib.ps1"   # Get-Repos (alias, path, per-repo worktree preference)
 
 # --- Collecting uncommitted files: ATTRIBUTION BY EVIDENCE ------------------------------------
 # Until 2026-07-28 this block scanned every repo in repos.conf and appended the result to THIS
@@ -92,7 +77,12 @@ function Read-ReposConf {
 # CONSEQUENCE, on purpose: if you work without a per-demand branch and without a per-demand
 # worktree, there is no evidence to attribute, so no uncommitted-files block is written. Silence is
 # correct here -- the previous behavior filled the log with other demands' files.
-$repos = Read-ReposConf "$worklogRoot\repos.conf"
+#
+# Both forms of evidence are always checked, whatever the repository's worktree preference says. The
+# preference records what the user chose to DO (see scripts/repo-worktree.ps1); it is not a filter on
+# what counts as evidence. A repo set to worktree=no that happens to have a worktree from before the
+# choice must still have its work attributed.
+$repos = @(Get-Repos -ConfPath "$worklogRoot\repos.conf")
 
 # Sources to inspect: @{ Label; Path }
 $sources = [System.Collections.Generic.List[object]]::new()
@@ -105,12 +95,12 @@ foreach ($d in @(Get-ChildItem $ticketDir -Directory -EA SilentlyContinue)) {
 }
 
 # 2. Monitored repos checked out on this demand's branch
-foreach ($entry in $repos.GetEnumerator()) {
-    if (-not (Test-Path $entry.Value)) { continue }
-    $branch = (git -C $entry.Value branch --show-current 2>$null)
+foreach ($repo in $repos) {
+    if (-not (Test-Path $repo.Path)) { continue }
+    $branch = (git -C $repo.Path branch --show-current 2>$null)
     if ($branch) { $branch = $branch.Trim() }
     if ($branch -and ($branch -eq $ticket -or $branch.EndsWith("/$ticket"))) {
-        $sources.Add([pscustomobject]@{ Label = "$($entry.Key):main-copy"; Path = $entry.Value })
+        $sources.Add([pscustomobject]@{ Label = "$($repo.Alias):main-copy"; Path = $repo.Path })
     }
 }
 

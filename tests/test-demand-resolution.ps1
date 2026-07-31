@@ -22,7 +22,9 @@ $sandTmp = Join-Path $sandbox 'tmp'
 
 if (Test-Path $sandbox) { Remove-Item $sandbox -Recurse -Force }
 New-Item -ItemType Directory -Force -Path "$sandbox\scripts", "$sandbox\worklogs\PROJ-AAAA", "$sandbox\worklogs\PROJ-BBBB", $sandTmp | Out-Null
+# The hooks dot-source the libs from $WORKLOG_PATH\scripts\, so the sandbox needs them too.
 Copy-Item "$real\scripts\active_demands_lib.ps1" "$sandbox\scripts\"
+Copy-Item "$real\scripts\repos_lib.ps1" "$sandbox\scripts\"
 # PROJ-AAAA uses an EM DASH, like the real template ("# Demand {TICKET_ID} - {NAME}" ships with one):
 # a plain hyphen here would not catch a mangled dash class in day-report.ps1.
 $em = [char]0x2014
@@ -242,6 +244,50 @@ Check 'C11 orphan pruned, reservation kept' 'PROJ-BBBB' ((Get-ActiveDemands -Pat
 $out12 = & powershell.exe -NoProfile -NonInteractive -File "$real\scripts\day-report.ps1" 2>$null
 $titleLine = @($out12 | Where-Object { $_ -match '^\[PROJ-AAAA' })
 Check 'C12 full title rendered' 'True' ([string](@($titleLine | Where-Object { $_ -match 'Test demand A' }).Count -gt 0))
+
+# ---------------------------------------------------------------------------
+# C13: repos_lib -- per-repository worktree preference. Absent means 'ask' (never a default), the
+#      value round-trips, a rewrite replaces instead of duplicating, and an old-format repos.conf
+#      with no preference lines still parses.
+# ---------------------------------------------------------------------------
+. "$real\scripts\repos_lib.ps1"
+$conf = "$sandbox\repos.conf"
+Set-Content $conf "# comment`nalpha=$sandbox\alpha`nbeta=$sandbox\beta`n" -Encoding utf8
+
+$parsed = @(Get-Repos -ConfPath $conf)
+Check 'C13 old format still parses'     'alpha,beta' (($parsed | ForEach-Object { $_.Alias }) -join ',')
+Check 'C13 absent preference is ask'    'ask,ask'    (($parsed | ForEach-Object { $_.Worktree }) -join ',')
+
+Set-RepoWorktreePreference -ConfPath $conf -Alias 'alpha' -Value 'no'
+Check 'C13 preference recorded'         'no'  (Get-RepoWorktreePreference -ConfPath $conf -Alias 'alpha')
+Check 'C13 other repo untouched'        'ask' (Get-RepoWorktreePreference -ConfPath $conf -Alias 'beta')
+
+Set-RepoWorktreePreference -ConfPath $conf -Alias 'alpha' -Value 'yes'
+$prefLines = @(Get-Content $conf | Where-Object { $_ -match '^alpha\.worktree=' })
+Check 'C13 rewrite replaces, no dupe'   '1'   ([string]$prefLines.Count)
+Check 'C13 new value read back'         'yes' (Get-RepoWorktreePreference -ConfPath $conf -Alias 'alpha')
+Check 'C13 paths preserved'             "$sandbox\alpha" (@(Get-Repos -ConfPath $conf | Where-Object { $_.Alias -eq 'alpha' })[0].Path)
+Check 'C13 comment preserved'           'True' ([string](@(Get-Content $conf | Where-Object { $_ -eq '# comment' }).Count -eq 1))
+
+# Unknown alias must be distinguishable from 'ask', and must not be silently registered
+Check 'C13 unknown alias returns null'  'True' ([string]($null -eq (Get-RepoWorktreePreference -ConfPath $conf -Alias 'nope')))
+$threw = $false
+try { Set-RepoWorktreePreference -ConfPath $conf -Alias 'nope' -Value 'yes' } catch { $threw = $true }
+Check 'C13 refuses unknown alias'       'True' ([string]$threw)
+
+# ---------------------------------------------------------------------------
+# C14: the Stop hook keeps attributing by branch after the repos.conf refactor (a repo on this
+#      demand's branch is logged; the preference is not a filter on evidence).
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Remove-Item $fakeWt -Recurse -Force -EA SilentlyContinue     # isolate: only the branch evidence left
+Invoke-Git -C $otherRepo checkout -q -b "test/PROJ-AAAA" | Out-Null
+Set-Content "$otherRepo\on-branch.md" "belongs to AAAA" -Encoding utf8
+Set-Content $conf "other=$otherRepo`nother.worktree=no`n" -Encoding utf8
+Set-Content "$sandTmp\claude_demand_sid14.txt" "PROJ-AAAA`n0" -Encoding utf8
+
+Invoke-Hook 'hook_session_log.ps1' 'sid14' | Out-Null
+Check 'C14 branch evidence still logged' 'True' ([string]((Get-FileText $logAAAA) -match 'on-branch\.md'))
 
 # ---------------------------------------------------------------------------
 $env:WORKLOG_PATH = $null
