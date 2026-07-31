@@ -17,8 +17,8 @@ data pipeline), this adds up fast.
 - **Injects context automatically** — the `UserPromptSubmit` hook injects the active
   demand's `CONTEXT.md` at the start of every session, so Claude knows exactly where you
   left off
-- **Logs sessions automatically** — the `Stop` hook appends uncommitted files to an audit
-  trail when you close Claude
+- **Logs sessions automatically** — the `Stop` hook records the demand's uncommitted files in
+  an audit trail and syncs git, once per turn
 - **Tracks demands as structured files** — each demand has a `CONTEXT.md` (current state)
   and `session_log.md` (audit trail), committed to a shared git repository
 - **Supports parallel sessions** — multiple team members can work simultaneously on
@@ -30,14 +30,44 @@ data pipeline), this adds up fast.
 claude-worklog (this repo)
     │
     ├── worklogs/TICKET-123/CONTEXT.md     ← Claude reads at session start
-    └── worklogs/TICKET-123/session_log.md ← hooks write at session end
+    └── worklogs/TICKET-123/session_log.md ← hooks write during the session
 
 UserPromptSubmit hook (fires on first message)
-    └── reads CONTEXT.md → injects as context into the session
+    └── resolves the demand → injects CONTEXT.md as context into the session
 
-Stop hook (fires when Claude closes)
-    └── detects uncommitted files across repos → appends to session_log.md → git sync
+Stop hook (fires once per turn)
+    └── records this demand's uncommitted files in session_log.md → git sync
+
+SessionEnd hook (fires once, at the true /exit)
+    └── clears session state → writes last_demand.txt (the resume point)
 ```
+
+### Demand resolution order
+
+The inject hook resolves which demand belongs to the session, in this order:
+
+1. the session's own demand file (survives restarting Claude in the same tab)
+2. the FIFO reservation queue, filled by `open-parallel.ps1`
+3. `active_demands.txt` — first ticket not claimed by another live session
+4. `last_demand.txt` — the resume point, if it is not already open elsewhere
+
+Step 4 is what makes the first session of the day open with context instead of stand-by:
+`active_demands.txt` is ephemeral by design ("who has a live session right now"), so without a
+separate resume point, ending the last session erased every trace of the demand.
+
+### Which work gets logged (attribution by evidence)
+
+The `Stop` hook only records uncommitted files it can prove belong to the active demand:
+
+- a git worktree under `worklogs/<TICKET>/`, or
+- a monitored repo whose current branch is `<TICKET>` or ends with `/<TICKET>`
+
+A monitored repo sitting on `main` or on another demand's branch is not recorded. This matters with
+parallel sessions: those working trees are shared, so a global scan credited one demand's work to
+another and corrupted the audit trail. The trade-off is explicit — **if you work without a
+per-demand branch or worktree, no uncommitted-files block is written**. The hook also never creates
+the day's section in `session_log.md`; that section is the record of what was done, written by you,
+and `day-report.ps1` flags demands that have commits but no entry.
 
 ## Quick Start
 
@@ -86,7 +116,10 @@ claude-worklog/
 │   ├── switch-demand.ps1             # Switch active demand mid-session
 │   ├── open-parallel.ps1             # Open parallel session in new window
 │   ├── standby.ps1                   # Clear active demand
-│   └── day-report.ps1                # Daily activity summary
+│   ├── day-report.ps1                # Daily activity summary
+│   └── active_demands_lib.ps1        # Shared state read/write (self-healing + atomic)
+├── tests/
+│   └── test-demand-resolution.ps1    # 25 checks in an isolated sandbox
 ├── templates/
 │   ├── CONTEXT_template.md           # Demand context scaffold
 │   └── CLAUDE.md.template            # CLAUDE.md template for team repos
@@ -147,6 +180,22 @@ For more efficient work, you can open different demands simultaneously in separa
 
 Each session independently tracks its active demand. Claude warns if two sessions open
 the same demand, preventing accidental concurrent edits to `CONTEXT.md` and `session_log.md`.
+
+The demand is handed to the new window through a FIFO queue, not by its position in
+`active_demands.txt` — opening two parallel windows back-to-back serves them in the order they were
+requested.
+
+## Tests
+
+```powershell
+powershell -NoProfile -File tests\test-demand-resolution.ps1
+```
+
+25 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
+never touched): the demand resolution chain, the guard against reopening a demand that is already
+live, `Stop` refusing to log without a demand file, attribution by evidence, self-healing of a
+corrupted `active_demands.txt`, and pruning of orphan entries. Run it after changing any hook or
+script.
 
 ## Configuration
 

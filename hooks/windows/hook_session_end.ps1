@@ -6,8 +6,8 @@
     needs no file heuristic to distinguish mid-turn from exit (that was the role of the old
     activeFlag-presence check in the Stop hook, removed once this hook took over cleanup).
     No "matcher" in settings.json -- fires for any reason (clear, resume, logout,
-    prompt_input_exit, bypass_permissions_disabled, other). Confirmed empirically (worklog,
-    TSK-596, 2026-07-14) that interactive /exit uses reason "prompt_input_exit" -- Anthropic's
+    prompt_input_exit, bypass_permissions_disabled, other). Confirmed empirically via a temporary
+    debug log (2026-07-14) that interactive /exit uses reason "prompt_input_exit" -- Anthropic's
     docs described that value as non-interactive-only.
     The "SessionEnd hook ... failed: Hook cancelled" message the CLI sometimes shows after /exit
     does NOT indicate a real failure: confirmed (same debug log) that the hook finishes and
@@ -51,6 +51,8 @@ if (Test-Path $demandFile) {
 }
 
 $activeFile = "$worklogRoot\active_demands.txt"
+$lastFile   = "$worklogRoot\last_demand.txt"
+. "$worklogRoot\scripts\active_demands_lib.ps1"   # Get-ActiveDemands / Set-ActiveDemands (self-healing read + atomic write)
 
 # Same lock used by hook_context_inject.ps1 -- protects active_demands.txt and the
 # claude_demand_*/claude_ctx_*/claude_active_* files against races between concurrent sessions
@@ -75,10 +77,25 @@ try {
                 if ($l.Count -gt 0) { $l[0].Trim() }
             })
         if ($ticket -notin $otherClaims) {
-            $lines = @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })
-            ($lines | Where-Object { $_.Trim() -ne $ticket }) | Set-Content $activeFile -Encoding utf8
+            $lines = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
+            Set-ActiveDemands -Path $activeFile -Tickets @($lines | Where-Object { $_.Trim() -ne $ticket })
         }
     }
+
+    # RESUME POINT: record the ticket in last_demand.txt.
+    # active_demands.txt is ephemeral by design ("who has a live session right now") and was just
+    # cleared above -- without this record, ending the last session of the day erased every trace of
+    # the demand and the next morning opened in stand-by (real bug, 2026-07-28).
+    # This is NOT the old current_demand.txt: that one was "the" demand of the single-session model,
+    # read by the Stop hook too, which allowed work to be attributed to the wrong demand.
+    # last_demand.txt has ONE meaning -- where to resume from when nothing more specific exists --
+    # and a single consumer (fallback 4 of hook_context_inject.ps1).
+    # Explicit stand-by wins: standby.ps1 clears this file, and a stand-by session has no demand
+    # file, so $ticket is null here and nothing is written.
+    if ($ticket) {
+        Set-Content $lastFile -Value $ticket -Encoding utf8
+    }
+
     Remove-Item $sessionMarker -Force -EA SilentlyContinue
     Remove-Item $demandFile    -Force -EA SilentlyContinue
     Remove-Item $activeFlag    -Force -EA SilentlyContinue

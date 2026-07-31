@@ -24,6 +24,7 @@ param(
 
 $worklogRoot = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { $PSScriptRoot | Split-Path -Parent }
 $activeFile  = "$worklogRoot\active_demands.txt"
+. "$PSScriptRoot\active_demands_lib.ps1"   # Get-ActiveDemands / Set-ActiveDemands (self-healing read + atomic write)
 
 # Fallback (sessionId not provided): most recently touched claude_active_{session_id}.flag.
 # FRAGILE HEURISTIC -- can match a DIFFERENT, unrelated Claude session active on the same
@@ -55,6 +56,23 @@ if (Test-Path $demandFile) {
 }
 if (-not $oldTicket) { $oldTicket = "(unknown)" }
 
+# No previous PID (a "ghost" session that never had a demand file, because the inject hook could not
+# register it): resolve this session's claude.exe by walking up the ParentProcessId chain until the
+# first claude.exe ancestor. Robust against intermediate processes (it does not assume a fixed number
+# of hops, unlike the 2-hop CIM approach that was discarded before). Avoids writing pid=0 into the
+# demand file, which would make liveness and orphan cleanup depend on the heartbeat alone.
+if ($existingPid -le 0) {
+    try {
+        $walkPid = $PID
+        for ($i = 0; $i -lt 12 -and $walkPid -gt 0; $i++) {
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid" -EA Stop
+            if (-not $proc) { break }
+            if ($proc.Name -like 'claude*') { $existingPid = [int]$walkPid; break }
+            $walkPid = [int]$proc.ParentProcessId
+        }
+    } catch { }
+}
+
 # Verify target demand exists
 if (-not (Test-Path "$worklogRoot\worklogs\$ticket")) {
     Write-Host "ERROR: demand $ticket not found in worklogs/." -ForegroundColor Red
@@ -84,8 +102,7 @@ Set-Content $demandFile -Value "$ticket`n$existingPid" -Encoding utf8
 # Update active_demands.txt: replace old ticket with new ticket.
 # Same global mutex used by hook_context_inject.ps1/hook_session_end.ps1 -- without it, a
 # concurrent write (e.g. a hook from another session running at the same instant) can duplicate
-# or drop entries (real bug: TSK-2276 duplicated in active_demands.txt, worklog TSK-596,
-# 2026-07-14). Select-Object -Unique added as a second layer of defense.
+# or drop entries (real bug: a duplicated ticket in active_demands.txt, 2026-07-14).
 $worklogMutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
 $worklogMutexAcquired = $false
 try {
@@ -95,14 +112,10 @@ try {
         $worklogMutexAcquired = $true
     }
 
-    if (Test-Path $activeFile) {
-        $lines   = @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })
-        $updated = @($lines | ForEach-Object { if ($_.Trim() -eq $oldTicket) { $ticket } else { $_ } } | Select-Object -Unique)
-        if ($ticket -notin @($updated | ForEach-Object { $_.Trim() })) { $updated = @($updated) + @($ticket) }
-        $updated | Set-Content $activeFile -Encoding utf8
-    } else {
-        Set-Content $activeFile -Value $ticket -Encoding utf8
-    }
+    $lines   = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
+    $updated = @($lines | ForEach-Object { if ($_.Trim() -eq $oldTicket) { $ticket } else { $_ } })
+    if ($ticket -notin @($updated | ForEach-Object { $_.Trim() })) { $updated = @($updated) + @($ticket) }
+    Set-ActiveDemands -Path $activeFile -Tickets $updated
 } finally {
     if ($worklogMutexAcquired) { $worklogMutex.ReleaseMutex() }
     $worklogMutex.Dispose()

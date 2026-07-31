@@ -14,8 +14,12 @@ To see a specific date, ask the user for the date first, then run:
 ```
 
 The report shows:
-- Commits grouped by demand and repository
-- Session log entries for the day
+- Session log entries for the day, per demand — this is the source of truth
+- Commits as supporting evidence, attributed by file path inside the worklog and by message in the
+  monitored repos; when the commit's label disagrees with the demand owning the file, the report
+  marks the divergence
+- Demands that have commits but no session log entry for the day (a gap in the audit trail)
+- Worklog infrastructure commits (outside `worklogs/`)
 - Open (uncommitted) files across monitored repositories (today only)
 
 Report the output to the user without additional commentary unless they ask questions about the activity.

@@ -37,7 +37,9 @@ param(
 $worklogRoot  = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { $PSScriptRoot | Split-Path -Parent }
 $demandDir    = "$worklogRoot\worklogs\$ticket"
 $contextFile  = "$demandDir\CONTEXT.md"
-$currentFile  = "$worklogRoot\current_demand.txt"
+# Resume point (fallback 4 of hook_context_inject.ps1): the freshly created demand becomes the one
+# the next session opens with. Replaces current_demand.txt, retired 2026-07-28.
+$lastFile     = "$worklogRoot\last_demand.txt"
 $templateFile = "$worklogRoot\templates\CONTEXT_template.md"
 
 if (-not (Test-Path $templateFile)) {
@@ -49,7 +51,7 @@ if (Test-Path $contextFile) {
     Write-Host "Demand $ticket already exists: $contextFile" -ForegroundColor Yellow
     $answer = Read-Host "Activate it as current demand? (y/N)"
     if ($answer -match '^[yY]$') {
-        Set-Content -Path $currentFile -Value $ticket -Encoding utf8
+        Set-Content -Path $lastFile -Value $ticket -Encoding utf8
         Write-Host "Demand $ticket activated." -ForegroundColor Green
     }
     exit 0
@@ -84,7 +86,7 @@ $content = $content `
     -replace '\{NEXT_ACTION\}',  "TODO: define the first next step"
 
 Set-Content -Path $contextFile -Value $content -Encoding utf8
-Set-Content -Path $currentFile -Value $ticket  -Encoding utf8
+Set-Content -Path $lastFile -Value $ticket -Encoding utf8
 
 # Sync to shared repository
 git -C $worklogRoot pull --rebase origin main
@@ -98,7 +100,7 @@ Write-Host ""
 Write-Host "Demand $ticket created." -ForegroundColor Green
 Write-Host ""
 Write-Host "  Context: $contextFile"
-Write-Host "  Active:  $currentFile"
+Write-Host "  Resume:  $lastFile"
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Edit CONTEXT.md: code `"$contextFile`""

@@ -2,3 +2,9 @@
 * text=auto eol=lf
 *.ps1 text eol=crlf
 *.md text eol=lf
+
+# session_log.md is append-only and multi-author: when two people add their own day entry, the
+# collision is trivial and both blocks must survive, so let git resolve it. Deliberately NOT applied
+# to CONTEXT.md or scripts -- those are structured content where a conflict is real and union merge
+# would clobber it silently.
+worklogs/**/session_log.md merge=union

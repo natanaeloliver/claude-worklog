@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
     Opens a parallel demand in a new Windows Terminal window.
-    Reserves the slot in active_demands.txt and starts Claude automatically.
+    Registers the ticket in active_demands.txt, enqueues the reservation, and starts Claude
+    automatically.
 
 .PARAMETER ticket
     Demand ID to open in the new session. Example: "PROJ-456"
@@ -16,6 +17,7 @@ param(
 
 $worklogRoot = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { $PSScriptRoot | Split-Path -Parent }
 $activeFile  = "$worklogRoot\active_demands.txt"
+. "$PSScriptRoot\active_demands_lib.ps1"   # Get-ActiveDemands / Set-ActiveDemands (self-healing read + atomic write)
 
 # Check for conflict: a live session already has this demand
 $conflict = $false
@@ -35,27 +37,28 @@ if ($conflict) {
     exit 1
 }
 
-# Reserve the slot in active_demands.txt for the new session's inject hook, and enqueue in the
+# Register the ticket in active_demands.txt for the new session's inject hook, and enqueue in the
 # FIFO queue consumed by hook_context_inject.ps1 in the new session before it falls back to
 # scanning active_demands.txt -- without this, opening two parallels back-to-back could make the
 # second new session grab an old/orphaned ticket already sitting in the file instead of its own
-# reservation (real bug, worklog TSK-596, 2026-07-03). Both writes now go under the SAME mutex the
-# hooks use -- before, only the FIFO append had this protection; the active_demands.txt write was
-# exposed to a race with a concurrent write from another session, causing duplicate entries (real
-# bug: TSK-2276 duplicated, worklog TSK-596, 2026-07-14). Select-Object -Unique added as a second
-# layer of defense.
+# reservation (real bug, 2026-07-03). Both writes go under the SAME mutex the hooks use -- before,
+# only the FIFO append had this protection; the active_demands.txt write was exposed to a race with
+# a concurrent write from another session, causing duplicate entries (real bug, 2026-07-14).
+#
+# The append goes at the END and the position in the file carries NO meaning -- there is no "slot 1".
+# That vocabulary came from the original design, when position WAS the delivery mechanism; with the
+# FIFO queue, delivery became fallback 2 of the inject hook, which wins before active_demands.txt
+# (fallback 3), and only the name stuck. Do not insert at the top: fallback 3 takes the FIRST
+# unclaimed ticket, so prepending would make a new session prefer the most recent reservation over
+# the oldest, inverting the serving order for no gain.
 $pendingFile = "$env:TEMP\claude_pending_open.txt"
 $mutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
 $mutexAcquired = $false
 try {
     try { $mutexAcquired = $mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $mutexAcquired = $true }
 
-    if (Test-Path $activeFile) {
-        $lines = @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })
-        (@($lines | Where-Object { $_.Trim() -ne $ticket }) + @($ticket) | Select-Object -Unique) | Set-Content $activeFile -Encoding utf8
-    } else {
-        Set-Content $activeFile -Value $ticket -Encoding utf8
-    }
+    $lines = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
+    Set-ActiveDemands -Path $activeFile -Tickets (@($lines | Where-Object { $_.Trim() -ne $ticket }) + @($ticket))
 
     Add-Content $pendingFile -Value $ticket -Encoding utf8
 } finally {
@@ -63,7 +66,7 @@ try {
     $mutex.Dispose()
 }
 
-Write-Host "Slot reserved for $ticket." -ForegroundColor Cyan
+Write-Host "$ticket registered in active_demands.txt and queued for the new window." -ForegroundColor Cyan
 
 if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
     Write-Host "Windows Terminal (wt) not found. Open a new window yourself and run:" -ForegroundColor Red
