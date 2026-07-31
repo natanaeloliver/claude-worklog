@@ -13,11 +13,15 @@ of each session. If the hook did not inject (stand-by or failure), read manually
 
 ```powershell
 $wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\github\claude-worklog" }
-$t  = (Get-Content "$wl\active_demands.txt" -EA Stop | Select-Object -First 1).Trim()
-Get-Content "$wl\worklogs\$t\CONTEXT.md"
+$t  = (Get-Content "$wl\active_demands.txt" -EA SilentlyContinue | Where-Object { $_.Trim() } | Select-Object -First 1)
+if (-not $t) { $t = (Get-Content "$wl\last_demand.txt" -Raw -EA SilentlyContinue) }
+if ($t) { Get-Content "$wl\worklogs\$($t.Trim())\CONTEXT.md" }
 ```
 
-**Stand-by:** if `active_demands.txt` is empty, no context is injected — Claude works normally.
+`active_demands.txt` answers "which demands have a live session right now" (ephemeral);
+`last_demand.txt` answers "where to resume from" (survives the end of the day).
+
+**Stand-by:** if both are empty, no context is injected — Claude works normally.
 
 ## Switching Demands
 

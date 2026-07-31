@@ -14,8 +14,24 @@ $t  = (Get-Content "$wl\active_demands.txt" -EA Stop | Select-Object -First 1).T
 Get-Content "$wl\worklogs\$t\CONTEXT.md"
 ```
 
-**Stand-by:** if `active_demands.txt` is empty or missing, no context is injected — Claude
-works normally without demand context.
+**State files** — both gitignored, per-user, one meaning each:
+
+| File | Answers |
+|---|---|
+| `active_demands.txt` | which demands have a live session **right now** (multi-valued, ephemeral) |
+| `last_demand.txt` | where to **resume** from (single-valued, survives the end of the day) |
+
+They do not substitute for each other. The old `current_demand.txt` was retired because it carried
+both meanings at once and had no writer in the multi-session model. Always read and write
+`active_demands.txt` through `scripts/active_demands_lib.ps1` (self-healing read, atomic write).
+
+**Stand-by:** if both files are empty, no context is injected — Claude works normally without demand
+context. `standby.ps1` clears both, so stand-by survives the end of the session.
+
+**Work attribution:** the audit trail is never inferred from shared state. The `Stop` hook logs only
+what it can prove belongs to the session's demand (worktree under `worklogs/<TICKET>/`, or a
+monitored repo on branch `<TICKET>`), and it does not create the day's section in `session_log.md` --
+that section is yours to write.
 
 ## Working in Other Repositories
 
@@ -101,8 +117,8 @@ $wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\gith
 # Create new demand
 & "$wl\scripts\new-demand.ps1" -ticket "PROJ-001" -name "Demand name" -sprint "Sprint2026.S11"
 
-# Stand-by (no active demand)
-& "$wl\scripts\standby.ps1"
+# Stand-by (no active demand) -- always pass -sessionId, same reason as switch-demand
+& "$wl\scripts\standby.ps1" -sessionId "SESSION_ID_FROM_SCRATCHPAD"
 
 # View all demands
 Get-ChildItem "$wl\worklogs\" -Directory | Select-Object Name

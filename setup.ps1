@@ -104,19 +104,19 @@ if (-not $Global) {
 # 3. Create initial tracking files
 Write-Host "[3/4] Creating tracking files..." -ForegroundColor Yellow
 
-$activeFile  = "$worklogRoot\active_demands.txt"
-$currentFile = "$worklogRoot\current_demand.txt"
+$activeFile = "$worklogRoot\active_demands.txt"
+$lastFile   = "$worklogRoot\last_demand.txt"
 
-$activeExisted  = Test-Path $activeFile
-$currentExisted = Test-Path $currentFile
+$activeExisted = Test-Path $activeFile
+$lastExisted   = Test-Path $lastFile
 
-if (-not $activeExisted)  { New-Item -ItemType File -Path $activeFile  -Force | Out-Null }
-if (-not $currentExisted) { New-Item -ItemType File -Path $currentFile -Force | Out-Null }
+if (-not $activeExisted) { New-Item -ItemType File -Path $activeFile -Force | Out-Null }
+if (-not $lastExisted)   { New-Item -ItemType File -Path $lastFile   -Force | Out-Null }
 
-if ($activeExisted -and $currentExisted) {
-    Write-Host "      active_demands.txt and current_demand.txt already exist. Skipping." -ForegroundColor DarkGray
+if ($activeExisted -and $lastExisted) {
+    Write-Host "      active_demands.txt and last_demand.txt already exist. Skipping." -ForegroundColor DarkGray
 } else {
-    Write-Host "      active_demands.txt and current_demand.txt created." -ForegroundColor Green
+    Write-Host "      active_demands.txt and last_demand.txt created." -ForegroundColor Green
 }
 
 # 4. Copy repos.conf.example if repos.conf doesn't exist

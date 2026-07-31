@@ -55,6 +55,7 @@ if (Test-Path $sessionMarker) {
 New-Item -ItemType File -Path $sessionMarker -Force | Out-Null
 
 $activeFile = "$worklogRoot\active_demands.txt"
+. "$worklogRoot\scripts\active_demands_lib.ps1"   # Get-ActiveDemands / Set-ActiveDemands (self-healing read + atomic write)
 
 # Cross-process lock: confirmed via live debugging (2026-07-01) that multiple Claude sessions
 # running this section at the same time cause a real race (not just a flaky read) over
@@ -70,8 +71,14 @@ try {
         $worklogMutexAcquired = $true
     }
 
-    # Sync worklog before reading
-    git -C $worklogRoot pull origin main 2>$null
+    # Sync worklog before reading. --rebase --autostash instead of a plain `git pull`: without them
+    # a pull with a dirty tree either fails or creates a merge commit, and the session starts out of
+    # sync. On conflict, ABORT the rebase -- never leave a rebase stuck, which breaks every
+    # subsequent hook in the session. Non-fatal throughout: a failed sync must not block the session.
+    # Only on the first message: the Stop hook already pulls+pushes every turn, so pulling again
+    # here would duplicate work under the same mutex.
+    git -C $worklogRoot pull --rebase --autostash origin main 2>$null
+    if ($LASTEXITCODE -ne 0) { git -C $worklogRoot rebase --abort 2>$null }
 
     # Helper: read ticket and PID from demand file (line1=ticket, line2=claude.exe pid)
     function Read-DemandFile {
@@ -119,7 +126,7 @@ if (Test-Path $demandFile) {
 # 2. Fallback: open-parallel.ps1's FIFO reservation queue -- a brand-new session (no demand
 #    file of its own yet) claims the reservation made for it, in the order it was made. Without
 #    this, the generic active_demands.txt fallback below can grab an old/orphaned entry unrelated
-#    to this open (real bug, worklog TSK-596, 2026-07-03).
+#    to this open (real bug found in production use, 2026-07-03).
 $pendingFile = "$env:TEMP\claude_pending_open.txt"
 if (-not $ticket -and (Test-Path $pendingFile)) {
     $pendingLines = @(Get-Content $pendingFile -Encoding utf8 -EA SilentlyContinue | Where-Object { $_.Trim() })
@@ -131,19 +138,21 @@ if (-not $ticket -and (Test-Path $pendingFile)) {
     }
 }
 
+# Tickets already claimed by ANOTHER live session -- used by fallbacks 3 and 4. Computed once
+# (the scan reads every demand file in %TEMP% and runs a liveness check on each).
+$claimedTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
+    $dfSid = $_.BaseName -replace 'claude_demand_', ''
+    if ($dfSid -eq $sessionId) { return }
+    $dfData = Read-DemandFile $_.FullName
+    if (-not $dfData.Ticket) { return }
+    $dfFlag = "$env:TEMP\claude_active_$dfSid.flag"
+    if (-not (Test-SessionAlive $dfData.Pid $dfFlag)) { return }
+    $dfData.Ticket
+} | Where-Object { $_ })
+
 # 3. Fallback: active_demands.txt -- first ticket not claimed by another live session
 if (-not $ticket -and (Test-Path $activeFile)) {
-    $claimedTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
-        $dfSid = $_.BaseName -replace 'claude_demand_', ''
-        if ($dfSid -eq $sessionId) { return }
-        $dfData = Read-DemandFile $_.FullName
-        if (-not $dfData.Ticket) { return }
-        $dfFlag = "$env:TEMP\claude_active_$dfSid.flag"
-        if (-not (Test-SessionAlive $dfData.Pid $dfFlag)) { return }
-        $dfData.Ticket
-    } | Where-Object { $_ })
-
-    foreach ($line in @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })) {
+    foreach ($line in (Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs")) {
         $candidate = $line.Trim()
         if ($candidate -and (Test-Path "$worklogRoot\worklogs\$candidate") -and ($candidate -notin $claimedTickets)) {
             $ticket = $candidate; break
@@ -151,12 +160,26 @@ if (-not $ticket -and (Test-Path $activeFile)) {
     }
 }
 
-# 4. Legacy fallback: current_demand.txt
+# 4. Final fallback: last_demand.txt -- THE RESUME POINT.
+# Written by hook_session_end.ps1 (last session to end) and by new-demand.ps1 (freshly created
+# demand); cleared by standby.ps1. It exists because active_demands.txt is ephemeral by design:
+# without this file, ending the last session of the day erased every trace of the demand and the
+# next morning opened in stand-by (real bug, 2026-07-28).
+# It replaces the old current_demand.txt fallback, a leftover of the single-session model that
+# survived the migration to parallel sessions as a compatibility bridge and was never retired: no
+# actor in the multi-session model wrote to it, only new-demand and standby, so it sat frozen on
+# some old demand while being trusted as "the" demand.
+# Claim guard: if the last demand is already open in another live session, do NOT reopen it here --
+# this fallback exists to recover lost context, not to duplicate a demand already being worked on
+# (which would only trigger the conflict warning below).
 if (-not $ticket) {
-    $legacyFile = "$worklogRoot\current_demand.txt"
-    if (Test-Path $legacyFile) {
-        $candidate = (Get-Content $legacyFile -Raw -Encoding utf8).Trim()
-        if ($candidate -and (Test-Path "$worklogRoot\worklogs\$candidate")) { $ticket = $candidate }
+    $lastFile = "$worklogRoot\last_demand.txt"
+    if (Test-Path $lastFile) {
+        $candidate = Get-Content $lastFile -Raw -Encoding utf8 -EA SilentlyContinue
+        if ($candidate) { $candidate = $candidate.Trim() }
+        if ($candidate -and ($candidate -notin $claimedTickets) -and (Test-Path "$worklogRoot\worklogs\$candidate")) {
+            $ticket = $candidate
+        }
     }
 }
 
@@ -166,9 +189,9 @@ if (-not $ticket) { exit 0 }
 Set-Content $demandFile -Value "$ticket`n$claudePid" -Encoding utf8
 
 # Add to active_demands.txt if not already there
-$lines = if (Test-Path $activeFile) { @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() }) } else { @() }
+$lines = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
 if ($ticket -notin ($lines | ForEach-Object { $_.Trim() })) {
-    ($lines + $ticket) | Set-Content $activeFile -Encoding utf8
+    Set-ActiveDemands -Path $activeFile -Tickets ($lines + $ticket)
 }
 
 # Clean up legacy files from old approach (keyed by numeric PID)
@@ -205,10 +228,29 @@ foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue))
             (Read-DemandFile $_.FullName).Ticket
         } | Where-Object { $_ })
         if ($orphanTicket -notin $liveTickets) {
-            $al = @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })
-            ($al | Where-Object { $_.Trim() -ne $orphanTicket }) | Set-Content $activeFile -Encoding utf8
+            $al = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
+            Set-ActiveDemands -Path $activeFile -Tickets @($al | Where-Object { $_.Trim() -ne $orphanTicket })
         }
     }
+}
+
+# Prune active_demands.txt entries with NO demand file at all -- residue from a session that died
+# without SessionEnd. Since that hook is hard-killed on /exit (anthropics/claude-code#70465),
+# residue is the norm, not the exception. The orphan cleanup above iterates claude_demand_*.txt, so
+# it only reaches sessions that still have a demand file; an entry with no file was invisible to it,
+# stayed in active_demands.txt forever, and fallback 3 then handed the wrong demand to every new
+# session (observed in production with 5 dead tickets piled up).
+# The FIFO queue protects the reservation made by open-parallel.ps1 whose window has not sent its
+# first message yet: it has no demand file either and must not be pruned.
+$liveTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
+    (Read-DemandFile $_.FullName).Ticket
+} | Where-Object { $_ })
+$reserved = @(Get-Content $pendingFile -Encoding utf8 -EA SilentlyContinue |
+    ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$current = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
+$kept = @($current | Where-Object { $_.Trim() -in $liveTickets -or $_.Trim() -in $reserved })
+if ($kept.Count -ne $current.Count) {
+    Set-ActiveDemands -Path $activeFile -Tickets $kept
 }
 
 } finally {

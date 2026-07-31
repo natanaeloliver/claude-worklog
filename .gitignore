@@ -1,5 +1,8 @@
-# Active demand tracking (per-user, not shared)
+# Demand state tracking (per-user, per-machine, never shared)
 active_demands.txt
+last_demand.txt
+# Retired in favor of last_demand.txt, kept ignored on purpose: a residual copy can reappear and,
+# without this line, the Stop hook's `git add -A` commits local state into the repository.
 current_demand.txt
 
 # Repository configuration (per-user paths)

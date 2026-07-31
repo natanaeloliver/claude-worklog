@@ -65,7 +65,7 @@ This script:
 1. Adds `$env:WORKLOG_PATH` to your PowerShell profile (`$PROFILE.CurrentUserAllHosts`)
 2. Confirms the project-level hooks (already shipped in `.claude\settings.json`) — no global
    change needed. They fire whenever you open `claude` inside this directory.
-3. Creates `active_demands.txt` and `current_demand.txt`
+3. Creates `active_demands.txt` and `last_demand.txt`
 4. Copies `repos.conf.example` to `repos.conf`
 
 **Prefer opening Claude directly inside each of your repos instead of staying in the hub?**
@@ -193,16 +193,25 @@ Get-ChildItem "$env:WORKLOG_PATH\worklogs\" -Directory
 ## Troubleshooting
 
 **Context not injected at session start**
-- Check that `active_demands.txt` has a demand listed: `Get-Content "$env:WORKLOG_PATH\active_demands.txt"`
+- Check the two state files: `Get-Content "$env:WORKLOG_PATH\active_demands.txt"` and
+  `Get-Content "$env:WORKLOG_PATH\last_demand.txt"`. If both are empty you are in stand-by by
+  design — switch to a demand or create one
+- If `active_demands.txt` looks like one long line with every ticket glued together, that is
+  corruption from an interrupted write; it now self-heals on the next read, and
+  `tests\test-demand-resolution.ps1` covers it
 - Default (hub-only): verify you opened `claude` inside `$env:WORKLOG_PATH`, and that the hook
   is in this repo's `.claude\settings.json` under `UserPromptSubmit`
 - `-Global` mode: verify the hook is in `~\.claude\settings.json` under `UserPromptSubmit`
   instead, and that the hook script path in settings.json is correct and the file exists
 
-**Session log not updated after closing Claude**
-- The `Stop` hook only fires when Claude exits cleanly (via `/exit`)
-- Forced closes (window X button) may not trigger the hook
-- Verify `Stop` hook is configured in `~\.claude\settings.json`
+**Session log not updated**
+- The `Stop` hook fires once per turn, not only at exit, so a forced close does not lose the work
+  already committed
+- The uncommitted-files block is only written when there is evidence the work belongs to the active
+  demand: a worktree under `worklogs/<TICKET>/`, or a monitored repo on branch `<TICKET>` (or
+  `*/<TICKET>`). Working on `main` produces no block, on purpose
+- The hook never creates the day's `## <date> <user>` section — write it yourself (or ask Claude to);
+  the block attaches to an existing section
 
 **`git pull` fails in the hook**
 - Ensure the worklog repo remote is accessible (VPN if internal GitLab)
@@ -240,8 +249,8 @@ working in" — the hook fires the same way either place.)
 
 | File | Purpose |
 |------|---------|
-| `active_demands.txt` | List of currently active demands (gitignored, per-user) |
-| `current_demand.txt` | Legacy single-demand pointer (gitignored, per-user) |
+| `active_demands.txt` | Demands with a live session **right now** — ephemeral, empties when the sessions end (gitignored, per-user) |
+| `last_demand.txt` | **Resume point** — last demand ended or created; this is what makes the first session of the day open with context (gitignored, per-user) |
 | `repos.conf` | Your local repository paths (gitignored, per-user) |
 | `worklogs/{TICKET}/CONTEXT.md` | Demand state — read by Claude at session start |
 | `worklogs/{TICKET}/session_log.md` | Audit trail — written by Claude + hooks |
