@@ -45,14 +45,17 @@ $demandFile    = "$env:TEMP\claude_demand_$sessionId.txt"
 # settings.json.
 New-Item -ItemType File -Path $activeFlag -Force | Out-Null
 
-# Re-injection guard: if marker exists and is less than 24h old, not the first message
+# Re-injection guard: a marker less than 24h old means this is NOT the first message, so there is
+# no context to inject. The guard used to `exit 0` right here, and the state CLEANUP left with it,
+# because the cleanup lived at the END of the hook: in a long session nothing was ever cleaned, and
+# if nobody opened a new session the orphan entry stayed in active_demands.txt indefinitely.
+# Now the guard only DECIDES ($reinject); the cleanup runs either way, with a grace period.
+$reinject = $true
 if (Test-Path $sessionMarker) {
     $age = (Get-Date) - (Get-Item $sessionMarker).LastWriteTime
-    if ($age.TotalHours -lt 24) { exit 0 }
-    Remove-Item $sessionMarker -Force -ErrorAction SilentlyContinue
+    if ($age.TotalHours -lt 24) { $reinject = $false }
+    else { Remove-Item $sessionMarker -Force -ErrorAction SilentlyContinue }
 }
-
-New-Item -ItemType File -Path $sessionMarker -Force | Out-Null
 
 $activeFile = "$worklogRoot\active_demands.txt"
 . "$worklogRoot\scripts\active_demands_lib.ps1"   # Get-ActiveDemands / Set-ActiveDemands (self-healing read + atomic write)
@@ -76,9 +79,12 @@ try {
     # sync. On conflict, ABORT the rebase -- never leave a rebase stuck, which breaks every
     # subsequent hook in the session. Non-fatal throughout: a failed sync must not block the session.
     # Only on the first message: the Stop hook already pulls+pushes every turn, so pulling again
-    # here would duplicate work under the same mutex.
-    git -C $worklogRoot pull --rebase --autostash origin main 2>$null
-    if ($LASTEXITCODE -ne 0) { git -C $worklogRoot rebase --abort 2>$null }
+    # here would duplicate work under the same mutex. Hence the $reinject guard -- without it the
+    # pull would start running on every turn, as a side effect of the cleanup moving up.
+    if ($reinject) {
+        git -C $worklogRoot pull --rebase --autostash origin main 2>$null
+        if ($LASTEXITCODE -ne 0) { git -C $worklogRoot rebase --abort 2>$null }
+    }
 
     # Helper: read ticket and PID from demand file (line1=ticket, line2=claude.exe pid)
     function Read-DemandFile {
@@ -112,7 +118,103 @@ try {
         return $false
     }
 
-    # Determine active demand for this session
+# Helper: tickets reserved for a window that has NOT sent its first message yet -- token
+# reservations (claude_reserva_<token>.txt, current) plus the FIFO queue (legacy). They have no
+# demand file yet, so they must not be pruned from active_demands.txt NOR handed to another session
+# by fallbacks 3 and 4. Read at two different moments (cleanup and fallback 3), hence a function:
+# the state changes in between, because fallback 1.5 consumes THIS window's reservation.
+function Get-ReservedTickets {
+    param([string]$pendingPath)
+    @(
+        @(Get-Item "$env:TEMP\claude_reserva_*.txt" -EA SilentlyContinue | ForEach-Object {
+            (Get-Content $_.FullName -Raw -Encoding utf8 -EA SilentlyContinue)
+        }) +
+        @(Get-Content $pendingPath -Encoding utf8 -EA SilentlyContinue)
+    ) | ForEach-Object { if ($_) { $_.Trim() } } | Where-Object { $_ }
+}
+
+$pendingFile = "$env:TEMP\claude_pending_open.txt"
+
+# ===========================================================================================
+# STATE CLEANUP -- BEFORE demand resolution, and not gated on this being a new session.
+#
+# Until 2026-08-12 these blocks lived at the END of the hook, after the demand had already been
+# resolved and written. The effect: fallback 3 walked active_demands.txt BEFORE the prune, so a
+# residual entry left by a session that died without SessionEnd (the norm, not the exception --
+# anthropics/claude-code#70465) was still HANDED to the new session; and once handed, the session
+# had a demand file with that ticket, which made the prune at the end of the SAME hook consider the
+# entry legitimate and keep it. The cleanup fixed the file for the sessions that came after, and
+# never for the one that inherited the residue.
+#
+# It also ran after the re-injection guard, so only on the first message of a session. Extracted
+# into a function to run in both regimes: ALWAYS on the first message, and every
+# $cleanupGraceMinutes on later turns. The grace period exists because this runs under the global
+# mutex, and work under the lock is what serializes every parallel session on this machine.
+# ===========================================================================================
+function Invoke-StateCleanup {
+    # Orphan demand files (dead process or expired heartbeat)
+    foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue)) {
+        $dfSid = $df.BaseName -replace 'claude_demand_', ''
+        if ($dfSid -eq $sessionId) { continue }
+        $dfData = Read-DemandFile $df.FullName
+        $dfFlag = "$env:TEMP\claude_active_$dfSid.flag"
+        if (Test-SessionAlive $dfData.Pid $dfFlag) { continue }
+        $orphanTicket = $dfData.Ticket
+        Remove-Item $df.FullName -Force -EA SilentlyContinue
+        Remove-Item "$env:TEMP\claude_ctx_$dfSid.marker" -Force -EA SilentlyContinue
+        Remove-Item $dfFlag -Force -EA SilentlyContinue
+        if ($orphanTicket -and (Test-Path $activeFile)) {
+            $liveTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
+                (Read-DemandFile $_.FullName).Ticket
+            } | Where-Object { $_ })
+            if ($orphanTicket -notin $liveTickets) {
+                $al = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
+                Set-ActiveDemands -Path $activeFile -Tickets @($al | Where-Object { $_.Trim() -ne $orphanTicket })
+            }
+        }
+    }
+
+    # TTL on reservations. A reservation for a window that never sent its first message (the user
+    # closed it, or `wt` failed) would otherwise live forever, and with it the matching entry in
+    # active_demands.txt, because the prune below preserves whatever is reserved. 24h is the same
+    # horizon as the re-injection guard.
+    foreach ($rv in (Get-Item "$env:TEMP\claude_reserva_*.txt" -EA SilentlyContinue)) {
+        if (((Get-Date) - $rv.LastWriteTime).TotalHours -ge 24) { Remove-Item $rv.FullName -Force -EA SilentlyContinue }
+    }
+
+    # Prune active_demands.txt entries with NO demand file at all -- residue from a session that died
+    # without SessionEnd. The orphan cleanup above iterates claude_demand_*.txt, so it only reaches
+    # sessions that still have a demand file; an entry with no file was invisible to it, stayed in
+    # active_demands.txt forever, and fallback 3 then handed the wrong demand to every new session.
+    $liveTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
+        (Read-DemandFile $_.FullName).Ticket
+    } | Where-Object { $_ })
+    $reserved = Get-ReservedTickets $pendingFile
+    $current  = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
+    $kept     = @($current | Where-Object { $_.Trim() -in $liveTickets -or $_.Trim() -in $reserved })
+    if ($kept.Count -ne $current.Count) {
+        Set-ActiveDemands -Path $activeFile -Tickets $kept
+    }
+}
+
+$cleanupStamp = "$env:TEMP\claude_cleanup.stamp"
+$cleanupGraceMinutes = 5
+$runCleanup = $reinject -or -not (Test-Path $cleanupStamp) -or
+              (((Get-Date) - (Get-Item $cleanupStamp).LastWriteTime).TotalMinutes -ge $cleanupGraceMinutes)
+if ($runCleanup) {
+    Invoke-StateCleanup
+    Set-Content $cleanupStamp -Value (Get-Date -Format 'o') -Encoding utf8
+}
+
+# Context already injected in this session (fresh marker): the cleanup above was all there was to do.
+# The early exit sits HERE, and no longer at the guard, because the cleanup has to run first.
+# `return` at script scope unwinds through the `finally` (releasing the mutex) and skips everything
+# after the try, which is the injection -- exactly what is wanted on a later turn.
+if (-not $reinject) { return }
+
+New-Item -ItemType File -Path $sessionMarker -Force | Out-Null
+
+# Determine active demand for this session
 $ticket = $null
 
 # 1. Demand file by session_id (persists across Claude restarts in the same terminal tab)
@@ -123,11 +225,32 @@ if (Test-Path $demandFile) {
     }
 }
 
-# 2. Fallback: open-parallel.ps1's FIFO reservation queue -- a brand-new session (no demand
-#    file of its own yet) claims the reservation made for it, in the order it was made. Without
-#    this, the generic active_demands.txt fallback below can grab an old/orphaned entry unrelated
-#    to this open (real bug found in production use, 2026-07-03).
-$pendingFile = "$env:TEMP\claude_pending_open.txt"
+# 1.5 RESERVATION BOUND TO THIS WINDOW -- wins over the legacy FIFO queue.
+#     `open-parallel.ps1` generates a token (GUID), writes the ticket to claude_reserva_<token>.txt
+#     and exports the token in WORKLOG_DEMAND_TOKEN, which `wt` propagates ONLY to the process tree
+#     of the new window. So the reservation reaches the window it was made for, no matter who types
+#     first -- which is exactly where the queue failed (see fallback 2).
+#     Consumed ONCE: the file is deleted here. That way a second `claude` in the same window (after
+#     /exit) does not silently reopen the old demand, it falls through to the normal fallbacks.
+if (-not $ticket -and $env:WORKLOG_DEMAND_TOKEN) {
+    $reservationFile = "$env:TEMP\claude_reserva_$($env:WORKLOG_DEMAND_TOKEN).txt"
+    if (Test-Path $reservationFile) {
+        $candidate = (Get-Content $reservationFile -Raw -Encoding utf8 -EA SilentlyContinue)
+        if ($candidate) { $candidate = $candidate.Trim() }
+        Remove-Item $reservationFile -Force -EA SilentlyContinue
+        if ($candidate -and (Test-Path "$worklogRoot\worklogs\$candidate")) { $ticket = $candidate }
+    }
+}
+
+# 2. LEGACY fallback: the FIFO reservation queue (`claude_pending_open.txt`). It was the delivery
+#    mechanism until 2026-08-12 and survives only to serve a queue still in flight from an older
+#    open-parallel.ps1 -- nothing writes to it any more.
+#    Why it was retired: the queue is GLOBAL and the pop always takes the FIRST item, on
+#    UserPromptSubmit -- and `/rename` (the initial prompt that names the tab) does NOT fire
+#    UserPromptSubmit, so the pop waits for the human to type. What pairs ticket with window becomes
+#    the order of TYPING, not the order of opening; and since `wt -w new` brings the new window to
+#    the front, the first thing typed goes into the LAST window opened, which consumes the FIRST
+#    reservation. With two opens back-to-back the swap is systematic, not bad luck.
 if (-not $ticket -and (Test-Path $pendingFile)) {
     $pendingLines = @(Get-Content $pendingFile -Encoding utf8 -EA SilentlyContinue | Where-Object { $_.Trim() })
     if ($pendingLines.Count -gt 0) {
@@ -138,8 +261,14 @@ if (-not $ticket -and (Test-Path $pendingFile)) {
     }
 }
 
-# Tickets already claimed by ANOTHER live session -- used by fallbacks 3 and 4. Computed once
-# (the scan reads every demand file in %TEMP% and runs a liveness check on each).
+# Tickets unavailable to fallbacks 3 and 4. Two sources:
+#  (a) claimed by ANOTHER live session (has a demand file and passes the liveness check);
+#  (b) RESERVED for a window that has not typed yet -- recomputed here, after fallback 1.5 consumed
+#      THIS window's reservation, so what is left belongs to some other window.
+# Without (b), a `claude` opened by hand (no reservation, so it falls to fallback 3) could walk off
+# with the ticket reserved for an open-parallel window that had not typed yet, and both sessions
+# would end up on the same demand. The prune above already preserved the reservation inside
+# active_demands.txt; what was missing was refusing to DELIVER it to someone who does not own it.
 $claimedTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
     $dfSid = $_.BaseName -replace 'claude_demand_', ''
     if ($dfSid -eq $sessionId) { return }
@@ -149,6 +278,7 @@ $claimedTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyConti
     if (-not (Test-SessionAlive $dfData.Pid $dfFlag)) { return }
     $dfData.Ticket
 } | Where-Object { $_ })
+$claimedTickets = @($claimedTickets + (Get-ReservedTickets $pendingFile)) | Where-Object { $_ } | Select-Object -Unique
 
 # 3. Fallback: active_demands.txt -- first ticket not claimed by another live session
 if (-not $ticket -and (Test-Path $activeFile)) {
@@ -183,7 +313,8 @@ if (-not $ticket) {
     }
 }
 
-if (-not $ticket) { exit 0 }
+# Stand-by: no fallback resolved. Leaves through the `finally`, like the guard above.
+if (-not $ticket) { return }
 
 # Register demand in this session's demand file (ticket + claude.exe PID for liveness check)
 Set-Content $demandFile -Value "$ticket`n$claudePid" -Encoding utf8
@@ -212,46 +343,10 @@ foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue))
     break
 }
 
-# Clean up orphan demand files (dead process or expired activeFlag)
-foreach ($df in (Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue)) {
-    $dfSid = $df.BaseName -replace 'claude_demand_', ''
-    if ($dfSid -eq $sessionId) { continue }
-    $dfData = Read-DemandFile $df.FullName
-    $dfFlag = "$env:TEMP\claude_active_$dfSid.flag"
-    if (Test-SessionAlive $dfData.Pid $dfFlag) { continue }
-    $orphanTicket = $dfData.Ticket
-    Remove-Item $df.FullName -Force -EA SilentlyContinue
-    Remove-Item "$env:TEMP\claude_ctx_$dfSid.marker" -Force -EA SilentlyContinue
-    Remove-Item "$env:TEMP\claude_active_$dfSid.flag" -Force -EA SilentlyContinue
-    if ($orphanTicket -and (Test-Path $activeFile)) {
-        $liveTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
-            (Read-DemandFile $_.FullName).Ticket
-        } | Where-Object { $_ })
-        if ($orphanTicket -notin $liveTickets) {
-            $al = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
-            Set-ActiveDemands -Path $activeFile -Tickets @($al | Where-Object { $_.Trim() -ne $orphanTicket })
-        }
-    }
-}
-
-# Prune active_demands.txt entries with NO demand file at all -- residue from a session that died
-# without SessionEnd. Since that hook is hard-killed on /exit (anthropics/claude-code#70465),
-# residue is the norm, not the exception. The orphan cleanup above iterates claude_demand_*.txt, so
-# it only reaches sessions that still have a demand file; an entry with no file was invisible to it,
-# stayed in active_demands.txt forever, and fallback 3 then handed the wrong demand to every new
-# session (observed in production with 5 dead tickets piled up).
-# The FIFO queue protects the reservation made by open-parallel.ps1 whose window has not sent its
-# first message yet: it has no demand file either and must not be pruned.
-$liveTickets = @(@(Get-Item "$env:TEMP\claude_demand_*.txt" -EA SilentlyContinue) | ForEach-Object {
-    (Read-DemandFile $_.FullName).Ticket
-} | Where-Object { $_ })
-$reserved = @(Get-Content $pendingFile -Encoding utf8 -EA SilentlyContinue |
-    ForEach-Object { $_.Trim() } | Where-Object { $_ })
-$current = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
-$kept = @($current | Where-Object { $_.Trim() -in $liveTickets -or $_.Trim() -in $reserved })
-if ($kept.Count -ne $current.Count) {
-    Set-ActiveDemands -Path $activeFile -Tickets $kept
-}
+# The orphan cleanup, the reservation TTL and the active_demands.txt prune used to live HERE, and
+# that was the defect: running after resolution, they fixed the file for the next sessions and never
+# for the one that had just inherited the residue. Moved above, see the "STATE CLEANUP" block.
+# Nothing runs after resolution on purpose: the hook ends by writing the additionalContext.
 
 } finally {
     if ($worklogMutexAcquired) { $worklogMutex.ReleaseMutex() }

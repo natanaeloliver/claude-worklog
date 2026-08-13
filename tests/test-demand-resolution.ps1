@@ -44,6 +44,9 @@ Invoke-Git -C $sandbox commit -qm "base" | Out-Null
 $env:WORKLOG_PATH = $sandbox
 $env:TEMP = $sandTmp
 $env:TMP  = $sandTmp
+# Inherited by every child hook: a leftover token would hand a reservation to checks that must not
+# have one. C17 sets it deliberately and clears it right after.
+$env:WORKLOG_DEMAND_TOKEN = $null
 
 # -NoProfile is MANDATORY in the child calls: -NonInteractive does not stop the profile from
 # loading, and a user profile may define WORKLOG_PATH -- without -NoProfile the child hook would run
@@ -288,6 +291,128 @@ Set-Content "$sandTmp\claude_demand_sid14.txt" "PROJ-AAAA`n0" -Encoding utf8
 
 Invoke-Hook 'hook_session_log.ps1' 'sid14' | Out-Null
 Check 'C14 branch evidence still logged' 'True' ([string]((Get-FileText $logAAAA) -match 'on-branch\.md'))
+
+# ---------------------------------------------------------------------------
+# C15: the state cleanup runs BEFORE demand resolution. Known-bad case: active_demands.txt holds
+#      residue from a session that died without SessionEnd (no demand file at all) and the resume
+#      point names a different demand. While the prune ran after resolution, fallback 3 handed the
+#      residue over, and the prune then saw the fresh demand file and kept the entry as legitimate --
+#      the one session the cleanup never fixed was the one that inherited the residue.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA')
+Set-Content $lastFile "PROJ-BBBB" -Encoding utf8
+
+$out15 = Invoke-Hook 'hook_context_inject.ps1' 'sid15'
+$injected15 = if ($out15 -match 'ACTIVE DEMAND: (PROJ-\w+)') { $Matches[1] } else { '<stand-by>' }
+Check 'C15 residue not handed over'   'PROJ-BBBB' $injected15
+Check 'C15 residue pruned before use' 'PROJ-BBBB' ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
+
+# ---------------------------------------------------------------------------
+# C16: negative control for the prune -- an entry backed by a LIVE session must survive it (and
+#      still must not be handed to the new session). Without this, "prune everything" would pass C15.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA')
+Set-Content $lastFile '' -Encoding utf8
+Set-Content "$sandTmp\claude_demand_sidLive16.txt" "PROJ-AAAA`n$PID" -Encoding utf8
+New-Item -ItemType File -Path "$sandTmp\claude_active_sidLive16.flag" -Force | Out-Null
+
+$out16 = Invoke-Hook 'hook_context_inject.ps1' 'sid16'
+$injected16 = if ($out16 -match 'ACTIVE DEMAND: (PROJ-\w+)') { $Matches[1] } else { '<stand-by>' }
+Check 'C16 live entry not handed over' '<stand-by>' $injected16
+Check 'C16 live entry survives prune'  'PROJ-AAAA'  ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
+
+# ---------------------------------------------------------------------------
+# C17: reservation bound to the window. Known-bad case: two reservations made back-to-back and the
+#      window that types first is the SECOND one -- which is the normal case, since a new terminal
+#      window comes to the front. The FIFO pop returned the FIRST ticket there, swapping the two
+#      windows systematically. With the token each window gets its own, and the reservation file is
+#      consumed exactly once so a later `claude` in the same window does not silently reopen it.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA', 'PROJ-BBBB')
+Set-Content $lastFile '' -Encoding utf8
+$noBom  = New-Object System.Text.UTF8Encoding $false
+$resvA  = "$sandTmp\claude_reserva_tokenA.txt"
+$resvB  = "$sandTmp\claude_reserva_tokenB.txt"
+[System.IO.File]::WriteAllText($resvA, 'PROJ-AAAA', $noBom)   # first window opened
+[System.IO.File]::WriteAllText($resvB, 'PROJ-BBBB', $noBom)   # second window opened, types first
+
+$env:WORKLOG_DEMAND_TOKEN = 'tokenB'
+$out17 = Invoke-Hook 'hook_context_inject.ps1' 'sid17'
+$env:WORKLOG_DEMAND_TOKEN = $null
+$injected17 = if ($out17 -match 'ACTIVE DEMAND: (PROJ-\w+)') { $Matches[1] } else { '<stand-by>' }
+Check 'C17 window got its own ticket'    'PROJ-BBBB' $injected17
+Check 'C17 own reservation consumed'     'False'     ([string](Test-Path $resvB))
+Check 'C17 other reservation untouched'  'True'      ([string](Test-Path $resvA))
+
+# ---------------------------------------------------------------------------
+# C18: negative control for the reservation -- a session with NO token (a `claude` opened by hand)
+#      must not walk off with a reservation made for another window, must not prune it from
+#      active_demands.txt either, and must land in stand-by rather than duplicating the demand.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA')
+Set-Content $lastFile '' -Encoding utf8
+$resvC = "$sandTmp\claude_reserva_tokenC.txt"
+[System.IO.File]::WriteAllText($resvC, 'PROJ-AAAA', $noBom)
+
+$out18 = Invoke-Hook 'hook_context_inject.ps1' 'sid18'
+$injected18 = if ($out18 -match 'ACTIVE DEMAND: (PROJ-\w+)') { $Matches[1] } else { '<stand-by>' }
+Check 'C18 reserved ticket not handed to a stranger' '<stand-by>' $injected18
+Check 'C18 reservation survives'                     'True'       ([string](Test-Path $resvC))
+Check 'C18 reserved entry kept in active_demands'    'PROJ-AAAA'  ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
+
+# ---------------------------------------------------------------------------
+# C19: the cleanup no longer rides on the re-injection guard. On a LATER turn of the same session
+#      (fresh marker) residue must still be pruned, and nothing may be re-injected. Negative control
+#      at the end: with a fresh cleanup stamp the grace period must SKIP the work, otherwise every
+#      turn of every parallel session would serialize on the global mutex.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @()
+Set-Content $lastFile "PROJ-AAAA" -Encoding utf8
+Invoke-Hook 'hook_context_inject.ps1' 'sid19' | Out-Null      # first message: marker created
+
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA', 'PROJ-BBBB')   # PROJ-BBBB = residue
+Remove-Item "$sandTmp\claude_cleanup.stamp" -Force -EA SilentlyContinue
+$out19 = Invoke-Hook 'hook_context_inject.ps1' 'sid19'
+Check 'C19 later turn injects nothing' ''           $out19
+Check 'C19 later turn still prunes'    'PROJ-AAAA'  ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
+
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA', 'PROJ-BBBB')
+Set-Content "$sandTmp\claude_cleanup.stamp" -Value (Get-Date -Format 'o') -Encoding utf8
+Invoke-Hook 'hook_context_inject.ps1' 'sid19' | Out-Null
+Check 'C19 grace period skips the work' 'PROJ-AAAA,PROJ-BBBB' ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
+
+# ---------------------------------------------------------------------------
+# C20: TTL on reservations. A window that never sent its first message (user closed it, or `wt`
+#      failed) leaves a reservation behind, and the prune preserves whatever is reserved -- so
+#      without a TTL that ticket would sit in active_demands.txt forever. Known-bad case: a
+#      reservation older than 24h. Negative control right after: the same setup one hour old, which
+#      must survive, otherwise "always expire" would pass the first half.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA')
+Set-Content $lastFile '' -Encoding utf8
+$resvOld = "$sandTmp\claude_reserva_tokenOld.txt"
+[System.IO.File]::WriteAllText($resvOld, 'PROJ-AAAA', $noBom)
+(Get-Item $resvOld).LastWriteTime = (Get-Date).AddHours(-25)
+
+Invoke-Hook 'hook_context_inject.ps1' 'sid20' | Out-Null
+Check 'C20 stale reservation dropped' 'False' ([string](Test-Path $resvOld))
+Check 'C20 its entry pruned too'      ''      ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
+
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA')
+$resvNew = "$sandTmp\claude_reserva_tokenNew.txt"
+[System.IO.File]::WriteAllText($resvNew, 'PROJ-AAAA', $noBom)
+(Get-Item $resvNew).LastWriteTime = (Get-Date).AddHours(-1)
+
+Invoke-Hook 'hook_context_inject.ps1' 'sid21' | Out-Null
+Check 'C20 fresh reservation survives' 'True'      ([string](Test-Path $resvNew))
+Check 'C20 its entry kept'             'PROJ-AAAA' ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
 
 # ---------------------------------------------------------------------------
 $env:WORKLOG_PATH = $null

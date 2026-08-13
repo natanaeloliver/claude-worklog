@@ -47,13 +47,22 @@ SessionEnd hook (fires once, at the true /exit)
 The inject hook resolves which demand belongs to the session, in this order:
 
 1. the session's own demand file (survives restarting Claude in the same tab)
-2. the FIFO reservation queue, filled by `open-parallel.ps1`
-3. `active_demands.txt` — first ticket not claimed by another live session
-4. `last_demand.txt` — the resume point, if it is not already open elsewhere
+2. the reservation bound to this window, made by `open-parallel.ps1` (see [Parallel
+   Sessions](#parallel-sessions)), consumed once and then gone
+3. the legacy FIFO queue, kept only to drain a reservation still in flight from an older version;
+   nothing writes to it any more
+4. `active_demands.txt` — first ticket that is neither claimed by another live session nor reserved
+   for a window that has not sent its first message yet
+5. `last_demand.txt` — the resume point, if it is not already open elsewhere
 
-Step 4 is what makes the first session of the day open with context instead of stand-by:
+Step 5 is what makes the first session of the day open with context instead of stand-by:
 `active_demands.txt` is ephemeral by design ("who has a live session right now"), so without a
 separate resume point, ending the last session erased every trace of the demand.
+
+Before resolving, the hook cleans up state left behind by sessions that ended without `SessionEnd`:
+orphan demand files, reservations older than 24h, and `active_demands.txt` entries with no session
+behind them at all. It runs **before** resolution on purpose. Running it afterwards fixed the file
+for the sessions that came next and never for the one that had just been handed the residue.
 
 ### Which work gets logged (attribution by evidence)
 
@@ -204,9 +213,17 @@ For more efficient work, you can open different demands simultaneously in separa
 Each session independently tracks its active demand. Claude warns if two sessions open
 the same demand, preventing accidental concurrent edits to `CONTEXT.md` and `session_log.md`.
 
-The demand is handed to the new window through a FIFO queue, not by its position in
-`active_demands.txt` — opening two parallel windows back-to-back serves them in the order they were
-requested.
+The demand is handed to the new window by a reservation bound to that window, not by its position in
+`active_demands.txt` and not by a shared queue. `open-parallel.ps1` generates a token, writes the
+ticket into a reservation file keyed by it, and exports the token into the environment that Windows
+Terminal propagates to the new window and to no other. The first message of that window consumes the
+reservation, once.
+
+A queue cannot do this job: it is global, and the hook pops the first item on `UserPromptSubmit`.
+The initial prompt does not fire that event, so the pop waits for the human to type, and what pairs
+ticket with window becomes the order of typing rather than the order of opening. Since a new window
+comes to the front, the first thing typed lands in the last window opened and consumes the first
+reservation, so two windows opened back-to-back get swapped, systematically rather than by luck.
 
 ## Tests
 
@@ -214,11 +231,11 @@ requested.
 powershell -NoProfile -File tests\test-demand-resolution.ps1
 ```
 
-25 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
+53 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
 never touched): the demand resolution chain, the guard against reopening a demand that is already
 live, `Stop` refusing to log without a demand file, attribution by evidence, self-healing of a
-corrupted `active_demands.txt`, and pruning of orphan entries. Run it after changing any hook or
-script.
+corrupted `active_demands.txt`, pruning of orphan entries, and the window-bound reservation. Run it
+after changing any hook or script.
 
 ## Configuration
 

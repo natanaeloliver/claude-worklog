@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Opens a parallel demand in a new Windows Terminal window.
-    Registers the ticket in active_demands.txt, enqueues the reservation, and starts Claude
+    Registers the ticket in active_demands.txt, reserves it for that window, and starts Claude
     automatically.
 
 .PARAMETER ticket
@@ -37,21 +37,32 @@ if ($conflict) {
     exit 1
 }
 
-# Register the ticket in active_demands.txt for the new session's inject hook, and enqueue in the
-# FIFO queue consumed by hook_context_inject.ps1 in the new session before it falls back to
-# scanning active_demands.txt -- without this, opening two parallels back-to-back could make the
-# second new session grab an old/orphaned ticket already sitting in the file instead of its own
-# reservation (real bug, 2026-07-03). Both writes go under the SAME mutex the hooks use -- before,
-# only the FIFO append had this protection; the active_demands.txt write was exposed to a race with
-# a concurrent write from another session, causing duplicate entries (real bug, 2026-07-14).
+# Register the ticket in active_demands.txt for the new session's inject hook. The append goes at
+# the END and the position in the file carries NO meaning -- there is no "slot 1". That vocabulary
+# came from the original design, when position WAS the delivery mechanism. Do not insert at the top:
+# fallback 3 of the inject hook takes the FIRST unclaimed ticket, so prepending would make a new
+# session prefer the most recent reservation over the oldest, inverting the serving order for no
+# gain. The write goes under the SAME mutex the hooks use, otherwise a concurrent write from another
+# session produces duplicate entries (real bug, 2026-07-14).
 #
-# The append goes at the END and the position in the file carries NO meaning -- there is no "slot 1".
-# That vocabulary came from the original design, when position WAS the delivery mechanism; with the
-# FIFO queue, delivery became fallback 2 of the inject hook, which wins before active_demands.txt
-# (fallback 3), and only the name stuck. Do not insert at the top: fallback 3 takes the FIRST
-# unclaimed ticket, so prepending would make a new session prefer the most recent reservation over
-# the oldest, inverting the serving order for no gain.
-$pendingFile = "$env:TEMP\claude_pending_open.txt"
+# RESERVATION BOUND TO THE WINDOW. Delivery is no longer a FIFO queue: an opaque token (GUID) goes
+# into the environment of the new window (`WORKLOG_DEMAND_TOKEN`, inherited by that window's process
+# tree and by no other) and the ticket sits in a reservation file keyed by that token, consumed ONCE
+# by fallback 1.5 of hook_context_inject.ps1.
+#
+# Why the queue did not work: `claude_pending_open.txt` is GLOBAL and the hook always pops the FIRST
+# item, on UserPromptSubmit -- and `/rename` (the initial prompt) does NOT fire UserPromptSubmit, so
+# the pop waits for the human to type. What pairs ticket with window becomes the order of TYPING,
+# not the order of opening; and since `wt -w new` brings the new window to the front, the first
+# thing typed goes into the LAST window opened, which consumes the FIRST reservation. With two opens
+# back-to-back the swap is systematic, not bad luck. The demand file cannot be used instead: the
+# session_id only exists after claude has started, hence the token.
+#
+# The ticket itself does NOT go into the environment: if it did, a second `claude` in the same window
+# (after /exit) would silently reopen the old demand. Token plus single-use file solves it -- the
+# second time around the file is gone and the session falls through to the normal fallbacks.
+$reservationToken = [guid]::NewGuid().ToString()
+$reservationFile  = "$env:TEMP\claude_reserva_$reservationToken.txt"
 $mutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
 $mutexAcquired = $false
 try {
@@ -60,13 +71,14 @@ try {
     $lines = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
     Set-ActiveDemands -Path $activeFile -Tickets (@($lines | Where-Object { $_.Trim() -ne $ticket }) + @($ticket))
 
-    Add-Content $pendingFile -Value $ticket -Encoding utf8
+    # UTF8Encoding($false) = no BOM: `Set-Content -Encoding utf8` on PS 5.1 writes one on creation.
+    [System.IO.File]::WriteAllText($reservationFile, $ticket, (New-Object System.Text.UTF8Encoding $false))
 } finally {
     if ($mutexAcquired) { $mutex.ReleaseMutex() }
     $mutex.Dispose()
 }
 
-Write-Host "$ticket registered in active_demands.txt and queued for the new window." -ForegroundColor Cyan
+Write-Host "$ticket registered in active_demands.txt and reserved for the new window (token $($reservationToken.Substring(0,8)))." -ForegroundColor Cyan
 
 if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
     Write-Host "Windows Terminal (wt) not found. Open a new window yourself and run:" -ForegroundColor Red
@@ -92,6 +104,12 @@ $env:GIT_TERMINAL_PROMPT = $null
 foreach ($e in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'CLAUDE_CODE_*' })) {
     Remove-Item "Env:$($e.Name)" -ErrorAction SilentlyContinue
 }
+
+# The reservation token travels with `wt` through the very mechanism that made the markers above
+# leak into the new window: wt propagates the caller's environment. Here the propagation is the
+# feature, not the defect -- it is the only channel that tells ONE new window apart from the others
+# before a session_id exists. Set AFTER the cleanup above so it is not wiped by it.
+$env:WORKLOG_DEMAND_TOKEN = $reservationToken
 
 # --startingDirectory sets CWD without needing Set-Location
 # -Command claude starts Claude directly (same as typing 'claude' in the terminal)
