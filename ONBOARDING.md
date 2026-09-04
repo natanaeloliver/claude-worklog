@@ -69,10 +69,10 @@ This script:
 4. Copies `repos.conf.example` to `repos.conf`
 
 **Prefer opening Claude directly inside each of your repos instead of staying in the hub?**
-Run `.\setup.ps1 -Global` instead — it additionally writes the two hooks to
+Run `.\setup.ps1 -Global` instead — it additionally writes the three hooks to
 `~\.claude\settings.json` (`UserPromptSubmit` → `hook_context_inject.ps1`, `Stop` →
-`hook_session_log.ps1`), which is a machine-wide setting affecting every Claude Code project,
-not just this one. See [README.md — Optional: multi-repo direct mode](README.md#optional-multi-repo-direct-mode)
+`hook_session_log.ps1`, `SessionEnd` → `hook_session_end.ps1`), which is a machine-wide setting
+affecting every Claude Code project, not just this one. See [README.md — Optional: multi-repo direct mode](README.md#optional-multi-repo-direct-mode)
 before choosing this.
 
 ---
@@ -219,7 +219,18 @@ Get-ChildItem "$env:WORKLOG_PATH\worklogs\" -Directory
 
 **"demand not found" when switching**
 - The demand folder must exist under `worklogs/`
-- Create it first: `.\scripts\new-demand.ps1 -ticket "TICKET-ID" -name "Name"`
+- Create it first: `.\scripts\new-demand.ps1 -ticket "TICKET-ID" -name "Name"`. That creates the
+  structure only — it does not activate the demand, so follow it with `/switch-demand` or
+  `.\scripts\open-parallel.ps1 -ticket "TICKET-ID"`
+
+**A new window opened on the wrong demand**
+- The window reservation is only accepted when the demand already has a folder under `worklogs/`.
+  Open a brand-new ticket with `-name` so `open-parallel.ps1` creates the structure first
+
+**Several sessions died at once and their demands vanished from the state files**
+- Expected: each `SessionEnd` removes its own ticket, and `last_demand.txt` holds only one
+- Recover with `.\scripts\resume-sessions.ps1 -LastCrash` (add `-DryRun` to check first). It reads
+  `logs/sessions_ended.jsonl` and reopens each session with `claude --resume`
 
 ---
 
@@ -252,7 +263,8 @@ working in" — the hook fires the same way either place.)
 | File | Purpose |
 |------|---------|
 | `active_demands.txt` | Demands with a live session **right now** — ephemeral, empties when the sessions end (gitignored, per-user) |
-| `last_demand.txt` | **Resume point** — last demand ended or created; this is what makes the first session of the day open with context (gitignored, per-user) |
-| `repos.conf` | Your local repository paths **and per-repo preferences** such as `alias.worktree=yes\|no` (gitignored, per-user) |
+| `last_demand.txt` | **Resume point** — the last demand whose session ended; this is what makes the first session of the day open with context. Creating a demand does *not* write here (gitignored, per-user) |
+| `logs/sessions_ended.jsonl` | One line per session that ended, with its reason — the only trace left when several sessions die at once. Read by `scripts\resume-sessions.ps1` (gitignored, per-user) |
+| `repos.conf` | Your local repository paths **and per-repo preferences** such as `alias.worktree=yes\|no`. Paths may use `%VAR%`, and `<ALIAS>_PATH` overrides the file (gitignored, per-user) |
 | `worklogs/{TICKET}/CONTEXT.md` | Demand state — read by Claude at session start |
 | `worklogs/{TICKET}/session_log.md` | Audit trail — written by Claude + hooks |

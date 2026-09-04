@@ -16,4 +16,10 @@ $wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\gith
 
 After creation, show the user the path to the CONTEXT.md and remind them to fill in the Description and Business Context sections.
 
+**This creates the structure only — it does not activate the demand.** No session state is touched,
+so it is safe to run while another session is live. Tell the user how to actually work on it:
+
+- new window: `& "$wl\scripts\open-parallel.ps1" -ticket "<TICKET_ID>"`
+- current session: `/switch-demand`
+
 > `<REPOS>` is a comma-separated list of aliases matching entries in `repos.conf`. These are just cited for reference — the actual paths live in `repos.conf`, not in the demand file.

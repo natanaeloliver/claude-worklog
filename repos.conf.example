@@ -16,6 +16,15 @@
 # Paths with spaces work without quoting:
 #   data-pipeline=C:\Users\Jane Doe\Projects\My Data Pipeline
 #
+# Environment variables in the path are expanded, so a file shared between machines does not have to
+# hard-code one user's name:
+#   backend=%USERPROFILE%\Projects\my-backend
+#
+# And an <ALIAS>_PATH environment variable overrides the file entirely, for the machine where that
+# checkout lives somewhere else (the alias is upper-cased, non-alphanumerics become underscores, so
+# `data-pipeline` reads DATA_PIPELINE_PATH):
+#   setx BACKEND_PATH "D:\work\my-backend"
+#
 # Examples (WSL/Linux):
 #   backend=/home/yourname/projects/my-backend
 #   frontend=/home/yourname/projects/my-frontend

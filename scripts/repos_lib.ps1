@@ -46,7 +46,18 @@ function Get-Repos {
 
     $result = [System.Collections.Generic.List[object]]::new()
     foreach ($entry in $repos.GetEnumerator()) {
-        $raw = $prefs["$($entry.Key)|worktree"]
+        $alias = $entry.Key
+        # Path resolution, in order: the <ALIAS>_PATH environment variable (a per-machine override,
+        # which always wins) -> the repos.conf value with %VAR% expanded. The override is what lets
+        # the same repos.conf work on two machines whose checkouts live in different places, and the
+        # expansion is what lets a path be written as %USERPROFILE%\Projects\backend instead of
+        # hard-coding one user's name. Without either, a %VAR% in repos.conf silently resolves to a
+        # directory that does not exist, and the repo is skipped with no message.
+        $envName = ($alias.ToUpper() -replace '[^A-Z0-9]', '_') + '_PATH'
+        $envPath = [System.Environment]::GetEnvironmentVariable($envName)
+        $path = if ($envPath) { $envPath } else { [System.Environment]::ExpandEnvironmentVariables($entry.Value) }
+
+        $raw = $prefs["$alias|worktree"]
         # Normalized to yes / no / ask. "ask" is also what an absent or unrecognized value means:
         # never assume a default here, or the whole point of asking once is lost.
         $worktree = switch -Regex ("$raw".Trim().ToLower()) {
@@ -55,8 +66,8 @@ function Get-Repos {
             default             { 'ask' }
         }
         $result.Add([pscustomobject]@{
-            Alias    = $entry.Key
-            Path     = $entry.Value
+            Alias    = $alias
+            Path     = $path
             Worktree = $worktree
         })
     }

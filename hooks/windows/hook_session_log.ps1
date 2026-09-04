@@ -221,7 +221,14 @@ try {
             $list = ($pending | Select-Object -First 10 | ForEach-Object { $_.TrimStart() -replace '"', '' }) -join ', '
             if ($pending.Count -gt 10) { $list += " ... and $($pending.Count - 10) more" }
             git add -A
-            $commitMsg = "auto-commit on close [$ticket] - identify: $list"
+            # The message used to say "on close", but this is the `Stop` hook -- it fires EVERY
+            # turn. The history filled up with several "on close" commits per day for the same
+            # demand, which makes auditing by commit harder (and hook_session_end.ps1 commits
+            # nothing, so the text described nobody's event). The "identify:" prefix went too: it
+            # was a leftover instruction, and the list already carries the `git status --porcelain`
+            # status code. Keep `[TICKET]` in the message: day-report.ps1 groups commits from the
+            # monitored repos by that token and uses it for the divergence marker.
+            $commitMsg = "auto-commit for turn [$ticket] - $list"
             $msgFile = [System.IO.Path]::GetTempFileName()
             [System.IO.File]::WriteAllText($msgFile, $commitMsg, (New-Object System.Text.UTF8Encoding $false))
             git commit -F $msgFile
@@ -234,6 +241,13 @@ try {
         } else {
             git rebase --abort   # conflict with a teammate -- push waits for the next Stop
         }
+
+        # Sync stamp. This block has just pulled from the remote; the NEXT turn's inject hook reads
+        # the stamp and skips its own pull when it is recent. Without it there were two round trips
+        # per conversation cycle, separated only by the time the user spent typing.
+        # It is per MACHINE, not per session: every session shares the same working tree, so a pull
+        # by any one of them updates the checkout for all.
+        Set-Content "$env:TEMP\claude_worklog_sync.stamp" -Value (Get-Date -Format 'o') -Encoding utf8
     } finally {
         Pop-Location
     }

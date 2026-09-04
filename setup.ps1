@@ -60,9 +60,14 @@ if (-not $Global) {
 
     $injectHook = "$worklogRoot\hooks\windows\hook_context_inject.ps1"
     $stopHook   = "$worklogRoot\hooks\windows\hook_session_log.ps1"
+    # SessionEnd goes in too. It is the only actor that clears session state, writes the resume
+    # point and records the ending -- without it, -Global mode leaks a demand file and an
+    # active_demands.txt entry on every /exit, and a crash leaves nothing to resume from.
+    $endHook    = "$worklogRoot\hooks\windows\hook_session_end.ps1"
 
     $injectCmd = "powershell -NonInteractive -File `"$injectHook`""
     $stopCmd   = "powershell -NonInteractive -File `"$stopHook`""
+    $endCmd    = "powershell -NonInteractive -File `"$endHook`""
 
     if (Test-Path $claudeSettingsFile) {
         try {
@@ -92,6 +97,14 @@ if (-not $Global) {
         [pscustomobject]@{
             hooks = @(
                 [pscustomobject]@{ type = "command"; command = $stopCmd }
+            )
+        }
+    ) -Force
+
+    $settings.hooks | Add-Member -NotePropertyName SessionEnd -NotePropertyValue @(
+        [pscustomobject]@{
+            hooks = @(
+                [pscustomobject]@{ type = "command"; command = $endCmd }
             )
         }
     ) -Force

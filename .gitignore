@@ -8,6 +8,11 @@ current_demand.txt
 # Repository configuration (per-user paths)
 repos.conf
 
+# Local logs -- per-user, per-machine, and they hold local paths and session ids.
+# sessions_ended.jsonl feeds scripts/resume-sessions.ps1; stopfailure_events.jsonl feeds
+# scripts/stopfailure-report.ps1. Both are LOG, never state: nothing resolves a demand from them.
+logs/
+
 # Demand content files (binary, large, or sensitive)
 worklogs/**/*.csv
 worklogs/**/*.xlsx

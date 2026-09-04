@@ -27,12 +27,16 @@ $worklogRoot = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else {
 }
 
 # Read session_id from stdin (JSON sent by Claude Code) -- same pattern as the other hooks.
+# `reason` arrives in the same payload and used to be discarded: without it, a mass crash (three
+# live sessions dying at once) is indistinguishable in the record from three deliberate /exits.
 $sessionId = $null
+$reason    = $null
 try {
     $stdinContent = [Console]::In.ReadToEnd()
     if ($stdinContent) {
         $hookInput = $stdinContent | ConvertFrom-Json
         $sessionId = $hookInput.session_id
+        $reason    = $hookInput.reason
     }
 } catch {}
 
@@ -95,6 +99,33 @@ try {
     if ($ticket) {
         Set-Content $lastFile -Value $ticket -Encoding utf8
     }
+
+    # SESSION-END RECORD: one JSON line per session that ends.
+    # Measured reason: when several live sessions die together, this hook RUNS in all of them --
+    # each removes its own ticket from active_demands.txt (the guard above only protects a ticket
+    # claimed by ANOTHER session, and distinct tickets do not protect each other) and
+    # last_demand.txt, single-valued by design, keeps only the last one. Upstream on 2026-08-11
+    # three sessions died at 10:34 and two of the three demands left no trace at all in the worklog
+    # state; recovery had to come out of Claude Code's own transcripts, which are not an actor of
+    # this system.
+    # This file is a LOG, not state: append-only, per-user (gitignored), and nobody resolves a demand
+    # from it -- so it does not reintroduce the current_demand.txt class of bug (one file carrying
+    # several meanings). Its consumer is scripts/resume-sessions.ps1.
+    # Written through .NET with UTF8Encoding($false): `Add-Content -Encoding utf8` on PowerShell 5.1
+    # puts a BOM on file creation, and a BOM on line 1 breaks json.loads for anyone reading it later.
+    try {
+        $logDir = "$worklogRoot\logs"
+        if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+        $record = [ordered]@{
+            ts         = (Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz')
+            session_id = $sessionId
+            ticket     = if ($ticket) { $ticket } else { $null }
+            reason     = if ($reason) { $reason } else { 'unknown' }
+        }
+        $line = ($record | ConvertTo-Json -Compress) + "`n"
+        [System.IO.File]::AppendAllText("$logDir\sessions_ended.jsonl", $line,
+                                        (New-Object System.Text.UTF8Encoding $false))
+    } catch {}   # the record must never stop the cleanup below
 
     Remove-Item $sessionMarker -Force -EA SilentlyContinue
     Remove-Item $demandFile    -Force -EA SilentlyContinue

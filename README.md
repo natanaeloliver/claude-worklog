@@ -40,7 +40,13 @@ Stop hook (fires once per turn)
 
 SessionEnd hook (fires once, at the true /exit)
     └── clears session state → writes last_demand.txt (the resume point)
+                             → appends one line to logs/sessions_ended.jsonl
 ```
+
+That last line is what makes a crash recoverable. When several sessions die at once this hook runs
+in all of them, each removes its own ticket from `active_demands.txt`, and `last_demand.txt` is
+single-valued — so all but one demand left no trace at all. The record is a **log, never state**:
+nothing resolves a demand from it, and `scripts/resume-sessions.ps1` is its only consumer.
 
 ### Demand resolution order
 
@@ -121,6 +127,12 @@ code repos.conf
 .\scripts\new-demand.ps1 -ticket "PROJ-001" -name "My first demand"
 ```
 
+This creates the demand's **structure only** — it does not activate it and does not touch any live
+session's state, so it is safe to run while you are working on something else. To actually work on
+it, open a window for it (`.\scripts\open-parallel.ps1 -ticket "PROJ-001"`, which creates the
+structure for you if it does not exist yet) or switch the current session with
+`.\scripts\switch-demand.ps1`.
+
 **4. Open Claude** inside this directory (the hub) — not inside your other repos:
 ```powershell
 cd C:\path\to\claude-worklog
@@ -139,19 +151,24 @@ claude-worklog/
 ├── hooks/
 │   ├── windows/
 │   │   ├── hook_context_inject.ps1   # UserPromptSubmit hook
-│   │   └── hook_session_log.ps1      # Stop hook
+│   │   ├── hook_session_log.ps1      # Stop hook
+│   │   ├── hook_session_end.ps1      # SessionEnd hook
+│   │   └── hook_stop_failure_log.ps1 # StopFailure hook (optional, measurement only)
 │   └── bash/                         # Bash hooks (PRs welcome)
 ├── scripts/
-│   ├── new-demand.ps1                # Create a new demand
+│   ├── new-demand.ps1                # Create a demand's structure (does not activate it)
 │   ├── switch-demand.ps1             # Switch active demand mid-session
-│   ├── open-parallel.ps1             # Open parallel session in new window
+│   ├── open-parallel.ps1             # Open a demand in a new window
+│   ├── resume-sessions.ps1           # List session endings, resume a dead session
 │   ├── standby.ps1                   # Clear active demand
 │   ├── day-report.ps1                # Daily activity summary
+│   ├── stopfailure-report.ps1        # Reads the StopFailure log, prints the verdict
 │   ├── repo-worktree.ps1             # Per-repo worktree preference (asked once)
 │   ├── active_demands_lib.ps1        # Shared state read/write (self-healing + atomic)
+│   ├── session_lib.ps1               # Session identity/liveness + the /rename tab name
 │   └── repos_lib.ps1                 # repos.conf read/write (paths + preferences)
 ├── tests/
-│   └── test-demand-resolution.ps1    # 25 checks in an isolated sandbox
+│   └── test-demand-resolution.ps1    # 68 checks in an isolated sandbox
 ├── templates/
 │   ├── CONTEXT_template.md           # Demand context scaffold
 │   └── CLAUDE.md.template            # CLAUDE.md template for team repos
@@ -225,17 +242,50 @@ ticket with window becomes the order of typing rather than the order of opening.
 comes to the front, the first thing typed lands in the last window opened and consumes the first
 reservation, so two windows opened back-to-back get swapped, systematically rather than by luck.
 
+`open-parallel.ps1` also guarantees the demand's structure before reserving anything: the hook only
+accepts a reservation for a demand that has a folder, so opening a ticket that has none would
+silently fall through to another session's demand. Pass `-name` and the folder is created first.
+
+The new window's tab is renamed to the demand, by passing `/rename <ticket> <title>` as Claude's
+initial prompt — a local CLI command, so it costs no API turn. With parallel windows the tab title
+is the only thing that says which demand each one is serving.
+
+### Recovering after a crash
+
+```powershell
+.\scripts\resume-sessions.ps1                     # list recent session endings
+.\scripts\resume-sessions.ps1 -LastCrash -DryRun  # check what would be reopened
+.\scripts\resume-sessions.ps1 -LastCrash
+```
+
+It reads `logs/sessions_ended.jsonl` (falling back to Claude Code's own transcripts for sessions
+that predate the record) and reopens each dead session with `claude --resume <session_id>`, so the
+conversation comes back rather than starting over on the same demand. Live sessions are filtered out
+of the list, which is not cosmetic: `-LastCrash` anchors its window on the most recent ending, and a
+live session's transcript is always the most recently written file.
+
+Delivery here is the resumed session's own demand file — fallback 1, which wins over everything
+else. A resume must never go through any first-come-first-served channel: identity is already known
+(the `session_id`), and routing it through a shared one lets another live session consume it and
+walk off with the ticket.
+
 ## Tests
 
 ```powershell
 powershell -NoProfile -File tests\test-demand-resolution.ps1
 ```
 
-53 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
+68 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
 never touched): the demand resolution chain, the guard against reopening a demand that is already
 live, `Stop` refusing to log without a demand file, attribution by evidence, self-healing of a
-corrupted `active_demands.txt`, pruning of orphan entries, and the window-bound reservation. Run it
-after changing any hook or script.
+corrupted `active_demands.txt`, pruning of orphan entries, the window-bound reservation, session
+identity against a recycled PID, the per-turn commit message and sync stamp, `new-demand.ps1`
+leaving the resume point alone, ASCII-safe hook output, and path resolution in `repos.conf`.
+Run it after changing any hook or script.
+
+Each known-bad case is paired with a positive control, so "fix everything by disabling the check"
+cannot pass: C21 (a recycled PID must read as dead) sits next to C22 (the same file with a fresh
+heartbeat must still read as alive), and C25's "resume point untouched" next to "structure created".
 
 ## Configuration
 

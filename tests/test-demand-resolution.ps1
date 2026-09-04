@@ -25,6 +25,10 @@ New-Item -ItemType Directory -Force -Path "$sandbox\scripts", "$sandbox\worklogs
 # The hooks dot-source the libs from $WORKLOG_PATH\scripts\, so the sandbox needs them too.
 Copy-Item "$real\scripts\active_demands_lib.ps1" "$sandbox\scripts\"
 Copy-Item "$real\scripts\repos_lib.ps1" "$sandbox\scripts\"
+Copy-Item "$real\scripts\session_lib.ps1" "$sandbox\scripts\"
+# new-demand.ps1 scaffolds from the templates folder under $WORKLOG_PATH, so the sandbox needs it.
+New-Item -ItemType Directory -Force -Path "$sandbox\templates" | Out-Null
+Copy-Item "$real\templates\CONTEXT_template.md" "$sandbox\templates\"
 # PROJ-AAAA uses an EM DASH, like the real template ("# Demand {TICKET_ID} - {NAME}" ships with one):
 # a plain hyphen here would not catch a mangled dash class in day-report.ps1.
 $em = [char]0x2014
@@ -415,9 +419,124 @@ Check 'C20 fresh reservation survives' 'True'      ([string](Test-Path $resvNew)
 Check 'C20 its entry kept'             'PROJ-AAAA' ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
 
 # ---------------------------------------------------------------------------
+# C21: session identity is PID *plus* creation instant. Known-bad case: an orphan demand file whose
+#      recorded PID belongs to a process that is alive but is NOT claude.exe -- a PID Windows
+#      recycled -- with an expired heartbeat. The old check was `Get-Process -Id`, which finds that
+#      process and declares the dead session alive forever: its entry never leaves
+#      active_demands.txt, the demand is never handed to anyone, and the conflict warning fires for
+#      nothing. This test's own powershell.exe is exactly such a live non-claude process.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+$ownCreated = "$((Get-CimInstance Win32_Process -Filter "ProcessId=$PID").CreationDate.Ticks)"
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA')
+Set-Content $lastFile '' -Encoding utf8
+Set-Content "$sandTmp\claude_demand_sidGhost21.txt" "PROJ-AAAA`n$PID`n$ownCreated" -Encoding utf8
+New-Item -ItemType File -Path "$sandTmp\claude_active_sidGhost21.flag" -Force | Out-Null
+(Get-Item "$sandTmp\claude_active_sidGhost21.flag").LastWriteTime = (Get-Date).AddHours(-3)
+
+Invoke-Hook 'hook_context_inject.ps1' 'sid21b' | Out-Null
+Check 'C21 recycled PID declared dead' 'False' ([string](Test-Path "$sandTmp\claude_demand_sidGhost21.txt"))
+Check 'C21 its entry pruned'           ''      ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
+
+# ---------------------------------------------------------------------------
+# C22: positive control for C21 -- the SAME orphan, the same non-claude PID, but a FRESH heartbeat.
+#      It must still count as alive. Without this control, "declare everything dead" would pass C21.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA')
+Set-Content $lastFile '' -Encoding utf8
+Set-Content "$sandTmp\claude_demand_sidGhost22.txt" "PROJ-AAAA`n$PID`n$ownCreated" -Encoding utf8
+New-Item -ItemType File -Path "$sandTmp\claude_active_sidGhost22.flag" -Force | Out-Null
+
+Invoke-Hook 'hook_context_inject.ps1' 'sid22' | Out-Null
+Check 'C22 fresh heartbeat still alive' 'True'      ([string](Test-Path "$sandTmp\claude_demand_sidGhost22.txt"))
+Check 'C22 its entry kept'              'PROJ-AAAA' ((Get-ActiveDemands -Path $activeFile -WorklogsDir "$sandbox\worklogs") -join ',')
+
+# ---------------------------------------------------------------------------
+# C23/C24: the Stop hook commits with a per-TURN message, and leaves the sync stamp.
+#      C23 -- the message used to say "auto-commit on close" in a hook that fires every turn, and
+#      carried a leftover "identify:" instruction. `[TICKET]` must stay: day-report.ps1 groups
+#      commits from monitored repos by that token.
+#      C24 -- the stamp is what lets the next turn's inject hook skip its own pull. Without it the
+#      inject pulls on every single turn, which is the second round trip this removed.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-Content "$sandTmp\claude_demand_sid23.txt" "PROJ-AAAA`n0`n" -Encoding utf8
+Set-Content "$sandbox\worklogs\PROJ-AAAA\scratch23.txt" "work" -Encoding utf8
+Invoke-Hook 'hook_session_log.ps1' 'sid23' | Out-Null
+
+$msg23 = (Invoke-Git -C $sandbox log -1 --pretty=%s) -join ''
+Check 'C23 message is per-turn'     'True'  ([string]($msg23 -like 'auto-commit for turn `[PROJ-AAAA`]*'))
+Check 'C23 no leftover instruction' 'False' ([string]($msg23 -like '*identify:*'))
+Check 'C24 sync stamp written'      'True'  ([string](Test-Path "$sandTmp\claude_worklog_sync.stamp"))
+
+# ---------------------------------------------------------------------------
+# C25: new-demand.ps1 creates STRUCTURE only. It must not touch last_demand.txt: writing there meant
+#      that creating a folder for a new ticket stole the resume point from whoever was working, and
+#      the next session without a window reservation came up on the freshly created demand. It must
+#      also be non-interactive on an existing demand -- open-parallel.ps1 calls it unattended.
+# ---------------------------------------------------------------------------
+Set-Content $lastFile 'PROJ-BBBB' -Encoding utf8
+# EAP back to Continue around these calls: new-demand.ps1 runs `git pull` in a sandbox with no
+# remote, and on PowerShell 5.1 a native command's stderr becomes a terminating ErrorRecord under
+# EAP='Stop' -- the same reason Invoke-Git exists at the top of this file.
+$eap25 = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& powershell.exe -NoProfile -NonInteractive -File "$real\scripts\new-demand.ps1" -ticket 'PROJ-CCCC' -name 'Created by the suite' 2>&1 | Out-Null
+Check 'C25 structure created'      'True'      ([string](Test-Path "$sandbox\worklogs\PROJ-CCCC\CONTEXT.md"))
+Check 'C25 resume point untouched' 'PROJ-BBBB' (Get-FileText $lastFile)
+
+& powershell.exe -NoProfile -NonInteractive -File "$real\scripts\new-demand.ps1" -ticket 'PROJ-CCCC' -name 'Created by the suite' 2>&1 | Out-Null
+Check 'C25 second run is a no-op'  'PROJ-BBBB' (Get-FileText $lastFile)
+$ErrorActionPreference = $eap25
+
+# ---------------------------------------------------------------------------
+# C26: the hook's stdout must be pure ASCII and valid JSON. ConvertTo-Json on PowerShell 5.1 emits
+#      non-ASCII literally, and Write-Output encodes with [Console]::OutputEncoding, which in a fresh
+#      terminal window is a legacy OEM code page -- the harness reads it as UTF-8, so every non-ASCII
+#      character came through corrupted, silently, until a sequence the decoder could not close
+#      turned it into "JSON Parse error: Unterminated string". PROJ-AAAA's H1 carries an em dash on
+#      purpose, so this check exercises the real path.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @()
+Set-Content $lastFile 'PROJ-AAAA' -Encoding utf8
+
+$out26 = Invoke-Hook 'hook_context_inject.ps1' 'sid26'
+Check 'C26 stdout is pure ASCII' 'True' ([string]($out26 -notmatch '[^\x20-\x7E\r\n\t]'))
+$parsed26 = $null
+try { $parsed26 = $out26 | ConvertFrom-Json } catch { }
+Check 'C26 stdout parses as JSON' 'True' ([string]($null -ne $parsed26))
+$emDash = [char]0x2014
+Check 'C26 em dash reconstructed' 'True' ([string]($null -ne $parsed26 -and $parsed26.hookSpecificOutput.additionalContext.Contains($emDash)))
+
+# ---------------------------------------------------------------------------
+# C27: repos_lib resolves paths -- %VAR% expanded, and <ALIAS>_PATH overriding the file. Without the
+#      expansion a repos.conf written with %USERPROFILE% silently resolves to a directory that does
+#      not exist, and the repository is skipped with no message anywhere.
+# ---------------------------------------------------------------------------
+$conf27 = "$sandbox\repos27.conf"
+Set-Content $conf27 "gamma=%USERPROFILE%\gamma`ndelta=$sandbox\delta`n" -Encoding utf8
+$r27 = @(Get-Repos -ConfPath $conf27)
+Check 'C27 %VAR% expanded' "$env:USERPROFILE\gamma" (($r27 | Where-Object { $_.Alias -eq 'gamma' }).Path)
+
+$env:DELTA_PATH = "$sandbox\override-delta"
+$r27b = @(Get-Repos -ConfPath $conf27)
+$env:DELTA_PATH = $null
+Check 'C27 <ALIAS>_PATH wins' "$sandbox\override-delta" (($r27b | Where-Object { $_.Alias -eq 'delta' }).Path)
+
+# ---------------------------------------------------------------------------
 $env:WORKLOG_PATH = $null
 $results | Format-Table -AutoSize
 $failed = @($results | Where-Object { $_.Status -eq 'FAIL' })
+# Failures also as a list: Format-Table truncates Expected/Actual to the console width, and when
+# the output is redirected to a file that width is 120 -- which hid exactly the columns needed to
+# tell what went wrong.
+if ($failed.Count -gt 0) {
+    Write-Host ""
+    Write-Host "--- FAILURES ---" -ForegroundColor Red
+    $failed | Format-List Case, Expected, Actual
+}
 Write-Host ""
 if ($failed.Count -eq 0) {
     Write-Host "ALL $($results.Count) CHECKS PASSED" -ForegroundColor Green

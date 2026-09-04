@@ -12,4 +12,9 @@ $wl = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { "$env:USERPROFILE\gith
 Confirm to the user that stand-by mode is now active. Remind them that:
 - No demand context will be injected in future sessions — the script clears both
   `active_demands.txt` (this session) and `last_demand.txt` (the resume point)
-- To resume: use `/switch-demand` or create a new demand with `/new-demand`
+- To resume: use `/switch-demand`, or create a demand with `/new-demand` and then open or switch
+  into it (creating one no longer activates it)
+
+If the script printed a `/rename stand-by` line, **relay it verbatim**: the tab still announces the
+previous demand, and renaming it is a human step (a CLI built-in that neither the script nor you
+can execute).
