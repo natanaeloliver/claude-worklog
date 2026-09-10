@@ -70,16 +70,29 @@ New-Item -ItemType File -Path $activeFlag -Force | Out-Null
 # 2026-09-03: hook stdout of 19.8KB, ~18KB of it the diffstat of a 17-file fast-forward, with the
 # JSON on line 24 of the persisted file. $LASTEXITCODE is set by the native command and not by the
 # pipeline, so the rebase --abort guard below still works.
+#
+# And nothing is pulled unless HEAD is the branch WORKLOG_BRANCH names (`main` by default) -- see
+# scripts/sync_lib.ps1. A mismatch also silences the Stop hook's commit/push, so the session is told
+# about it once, in the warning slot at the bottom of this file: the failure mode being prevented is
+# a whole session's worth of work never being committed with nobody noticing.
+. "$worklogRoot\scripts\sync_lib.ps1"   # Get-SyncTarget (WORKLOG_BRANCH, and the refusal to sync from another branch)
+$syncTarget = Get-SyncTarget -RepoPath $worklogRoot
+$syncBranchWarning = $null
+if (-not $syncTarget.Matches) {
+    $headName = if ($syncTarget.Head) { "'$($syncTarget.Head)'" } else { 'a detached HEAD' }
+    $syncBranchWarning = "HOOK WARNING: worklog sync is OFF -- WORKLOG_BRANCH targets '$($syncTarget.Branch)' and the worklog repo is on $headName. Nothing will be committed, pulled or pushed until the two match."
+}
+
 $syncStamp = "$env:TEMP\claude_worklog_sync.stamp"
 $syncWindowSeconds = 90
 $syncRecent = (Test-Path $syncStamp) -and
               (((Get-Date) - (Get-Item $syncStamp).LastWriteTime).TotalSeconds -lt $syncWindowSeconds)
-if (-not $syncRecent) {
+if ($syncTarget.Matches -and -not $syncRecent) {
     $syncMutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
     $syncOk = $false
     try {
         try { $syncOk = $syncMutex.WaitOne(10000) } catch [System.Threading.AbandonedMutexException] { $syncOk = $true }
-        git -C $worklogRoot pull --rebase --autostash origin main 2>$null | Out-Null
+        git -C $worklogRoot pull --rebase --autostash origin $($syncTarget.Branch) 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { git -C $worklogRoot rebase --abort 2>$null | Out-Null }
         Set-Content $syncStamp -Value (Get-Date -Format 'o') -Encoding utf8
     } finally {
@@ -333,10 +346,17 @@ if (-not $ticket) { return }
 # Register demand in this session's demand file (ticket + claude.exe PID + creation instant)
 Write-DemandFile -Path $demandFile -Ticket $ticket -Session $claudeSession
 
-# Add to active_demands.txt if not already there
+# Add to active_demands.txt if not already there.
+# @($lines) is load-bearing. Get-ActiveDemands returns @(...), but PowerShell UNWRAPS a
+# single-element array on return, so a file holding exactly ONE ticket arrives here as a String --
+# and with a String on the left, `+` concatenates TEXT instead of adding collections, writing
+# "PROJ-AAAAPROJ-BBBB" as a single line. That is the very corruption active_demands_lib.ps1 was
+# written to survive, produced by this line; the self-healing read then hid it (real case,
+# 2026-09-10, two live sessions). Same defect class as the glued file names fixed in
+# hook_session_log.ps1 -- the other two callers already wrapped both sides.
 $lines = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
 if ($ticket -notin ($lines | ForEach-Object { $_.Trim() })) {
-    Set-ActiveDemands -Path $activeFile -Tickets ($lines + $ticket)
+    Set-ActiveDemands -Path $activeFile -Tickets (@($lines) + $ticket)
 }
 
 # Clean up legacy files from old approach (keyed by numeric PID)
@@ -374,9 +394,10 @@ $context = Get-Content $contextFile -Raw -Encoding utf8
 $context = [regex]::Replace($context, '[\uD800-\uDFFF]', '')
 
 $additionalContext = "=== ACTIVE DEMAND: $ticket ===" + "`n`n" + $context
-if ($conflictWarning) {
-    $mandatory = "[MANDATORY INSTRUCTION: Report this warning on the first line of your response, before anything else, regardless of what the user asks.]"
-    $additionalContext = ">>> $conflictWarning <<<`n$mandatory`n`n" + $additionalContext
+$warnings = @($syncBranchWarning, $conflictWarning) | Where-Object { $_ }
+if ($warnings.Count -gt 0) {
+    $mandatory = "[MANDATORY INSTRUCTION: Report the warnings above on the first line of your response, before anything else, regardless of what the user asks.]"
+    $additionalContext = (($warnings | ForEach-Object { ">>> $_ <<<" }) -join "`n") + "`n$mandatory`n`n" + $additionalContext
 }
 
 $output = [ordered]@{

@@ -166,9 +166,10 @@ claude-worklog/
 │   ├── repo-worktree.ps1             # Per-repo worktree preference (asked once)
 │   ├── active_demands_lib.ps1        # Shared state read/write (self-healing + atomic)
 │   ├── session_lib.ps1               # Session identity/liveness + the /rename tab name
-│   └── repos_lib.ps1                 # repos.conf read/write (paths + preferences)
+│   ├── repos_lib.ps1                 # repos.conf read/write (paths + preferences)
+│   └── sync_lib.ps1                  # Which branch the hub syncs with (WORKLOG_BRANCH)
 ├── tests/
-│   └── test-demand-resolution.ps1    # 68 checks in an isolated sandbox
+│   └── test-demand-resolution.ps1    # 79 checks in an isolated sandbox
 ├── templates/
 │   ├── CONTEXT_template.md           # Demand context scaffold
 │   └── CLAUDE.md.template            # CLAUDE.md template for team repos
@@ -275,12 +276,14 @@ walk off with the ticket.
 powershell -NoProfile -File tests\test-demand-resolution.ps1
 ```
 
-68 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
+79 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
 never touched): the demand resolution chain, the guard against reopening a demand that is already
 live, `Stop` refusing to log without a demand file, attribution by evidence, self-healing of a
 corrupted `active_demands.txt`, pruning of orphan entries, the window-bound reservation, session
 identity against a recycled PID, the per-turn commit message and sync stamp, `new-demand.ps1`
-leaving the resume point alone, ASCII-safe hook output, and path resolution in `repos.conf`.
+leaving the resume point alone, ASCII-safe hook output, path resolution in `repos.conf`, the
+refusal to sync from a branch other than the configured one, and `active_demands.txt` keeping one
+ticket per line when a second session claims one.
 Run it after changing any hook or script.
 
 Each known-bad case is paired with a positive control, so "fix everything by disabling the check"
@@ -301,6 +304,25 @@ frontend=C:\Users\yourname\Projects\my-frontend
 
 These repos appear in session logs and the day report — that's their only job. They're read
 via absolute path (`git diff`/`git log` against `$repoPath`), not opened as Claude sessions.
+
+### WORKLOG_BRANCH: which branch the hub syncs with
+
+The hub commits, pulls and pushes on `main`. Set `WORKLOG_BRANCH` to sync somewhere else:
+
+```powershell
+$env:WORKLOG_BRANCH = "dev"   # add it to $PROFILE to keep it across terminals
+```
+
+The rule is one guard: **the hub syncs only while its checkout is on that branch.** On any other
+branch (or a branch that does not exist, a detached HEAD, or the right name in the wrong case) the
+Stop hook commits nothing, pulls nothing and pushes nothing, and the next session opens with a
+warning saying so. It never falls
+back to `main`, and it never switches branch for you: parallel sessions share one working tree, so
+a hook moving `HEAD` would break every other session on the machine.
+
+Leave it unset unless you are working on `claude-worklog` itself. That is what it is for: the Stop
+hook commits every turn, so testing the tool inside its own repository is exactly how test commits
+end up on `main`.
 
 ## Optional: multi-repo direct mode
 

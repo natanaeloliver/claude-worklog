@@ -97,12 +97,20 @@ $content = $content `
 
 Set-Content -Path $contextFile -Value $content -Encoding utf8
 
-# Sync to shared repository
-git -C $worklogRoot pull --rebase origin main
-if ($LASTEXITCODE -eq 0) {
-    git -C $worklogRoot add $demandDir
-    git -C $worklogRoot commit -m "demand: $ticket - $name"
-    git -C $worklogRoot push origin main
+# Sync to shared repository, and only from the branch WORKLOG_BRANCH names -- see scripts/sync_lib.ps1.
+# Off that branch the folder is still created; what is skipped is publishing it.
+. "$PSScriptRoot\sync_lib.ps1"   # Get-SyncTarget (WORKLOG_BRANCH, and the refusal to sync from another branch)
+$syncTarget = Get-SyncTarget -RepoPath $worklogRoot
+if ($syncTarget.Matches) {
+    git -C $worklogRoot pull --rebase origin $($syncTarget.Branch)
+    if ($LASTEXITCODE -eq 0) {
+        git -C $worklogRoot add $demandDir
+        git -C $worklogRoot commit -m "demand: $ticket - $name"
+        git -C $worklogRoot push origin $($syncTarget.Branch)
+    }
+} else {
+    $headName = if ($syncTarget.Head) { "'$($syncTarget.Head)'" } else { 'a detached HEAD' }
+    Write-Host "Not pushed: WORKLOG_BRANCH targets '$($syncTarget.Branch)' and the repo is on $headName." -ForegroundColor Yellow
 }
 
 Write-Host ""
