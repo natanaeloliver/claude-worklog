@@ -169,7 +169,7 @@ claude-worklog/
 │   ├── repos_lib.ps1                 # repos.conf read/write (paths + preferences)
 │   └── sync_lib.ps1                  # Which branch the hub syncs with (WORKLOG_BRANCH)
 ├── tests/
-│   └── test-demand-resolution.ps1    # 77 checks in an isolated sandbox
+│   └── test-demand-resolution.ps1    # 79 checks in an isolated sandbox
 ├── templates/
 │   ├── CONTEXT_template.md           # Demand context scaffold
 │   └── CLAUDE.md.template            # CLAUDE.md template for team repos
@@ -276,7 +276,7 @@ walk off with the ticket.
 powershell -NoProfile -File tests\test-demand-resolution.ps1
 ```
 
-77 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
+79 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
 never touched): the demand resolution chain, the guard against reopening a demand that is already
 live, `Stop` refusing to log without a demand file, attribution by evidence, self-healing of a
 corrupted `active_demands.txt`, pruning of orphan entries, the window-bound reservation, session
@@ -314,8 +314,9 @@ $env:WORKLOG_BRANCH = "dev"   # add it to $PROFILE to keep it across terminals
 ```
 
 The rule is one guard: **the hub syncs only while its checkout is on that branch.** On any other
-branch (or a branch that does not exist, or a detached HEAD) the Stop hook commits nothing, pulls
-nothing and pushes nothing, and the next session opens with a warning saying so. It never falls
+branch (or a branch that does not exist, a detached HEAD, or the right name in the wrong case) the
+Stop hook commits nothing, pulls nothing and pushes nothing, and the next session opens with a
+warning saying so. It never falls
 back to `main`, and it never switches branch for you: parallel sessions share one working tree, so
 a hook moving `HEAD` would break every other session on the machine.
 

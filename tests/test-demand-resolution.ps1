@@ -599,10 +599,33 @@ Set-Content "$sandTmp\claude_demand_sidGhost32.txt" "PROJ-AAAA`n$PID`n$ownCreate
 New-Item -ItemType File -Path "$sandTmp\claude_active_sidGhost32.flag" -Force | Out-Null
 
 Invoke-Hook 'hook_context_inject.ps1' 'sid32' | Out-Null
-$raw32 = @(([System.IO.File]::ReadAllText($activeFile) -split "?
+$raw32 = @(([System.IO.File]::ReadAllText($activeFile) -split "
+?
 ") | Where-Object { $_.Trim() })
 Check 'C32 two separate lines' '2'     ([string]$raw32.Count)
 Check 'C32 nothing glued'      'False' ([string]($raw32 -contains 'PROJ-AAAAPROJ-BBBB'))
+
+# ---------------------------------------------------------------------------
+# C33: the branch comparison is CASE-SENSITIVE, because git is and PowerShell's -eq is not.
+#      WORKLOG_BRANCH='MAIN' over a checkout of 'main' used to pass the guard: the commit was made
+#      locally and then `pull --rebase origin MAIN` failed ("couldn't find remote ref MAIN"), so the
+#      push never ran. A commit stuck on one machine with no message is worse than a refusal, which
+#      at least announces itself. Paired with the exact-case control right after it, so the fix
+#      cannot be "refuse everything".
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-Content "$sandTmp\claude_demand_sid33.txt" "PROJ-AAAA`n0`n" -Encoding utf8
+Set-Content "$sandbox\worklogs\PROJ-AAAA\scratch33.txt" "work" -Encoding utf8
+$head33 = (Invoke-Git -C $sandbox rev-parse HEAD) -join ''
+
+$env:WORKLOG_BRANCH = 'MAIN'
+Invoke-Hook 'hook_session_log.ps1' 'sid33' | Out-Null
+Check 'C33 wrong case commits nothing' 'True' ([string](((Invoke-Git -C $sandbox rev-parse HEAD) -join '') -eq $head33))
+
+$env:WORKLOG_BRANCH = 'main'
+Invoke-Hook 'hook_session_log.ps1' 'sid33' | Out-Null
+Check 'C33 exact case commits'        'True' ([string](((Invoke-Git -C $sandbox rev-parse HEAD) -join '') -ne $head33))
+$env:WORKLOG_BRANCH = $null
 
 # ---------------------------------------------------------------------------
 $env:WORKLOG_PATH = $null

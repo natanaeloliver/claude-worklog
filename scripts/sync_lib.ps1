@@ -28,9 +28,14 @@ function Get-SyncTarget {
     $head = (git -C $RepoPath branch --show-current 2>$null)
     if ($head) { $head = $head.Trim() }
 
+    # -ceq, not -eq: PowerShell compares strings case-insensitively and git does not. On Windows
+    # a loose ref resolves either way (NTFS), so WORKLOG_BRANCH='DEV' over a checkout of 'dev'
+    # passed the guard and the local commit happened -- and then `pull --rebase origin DEV` failed
+    # with "couldn't find remote ref DEV", so the push never ran and the commit stayed on the
+    # machine with nothing said. The wrong case must land in the refusal, which is announced.
     return [pscustomobject]@{
         Branch  = $branch
         Head    = $head
-        Matches = ($head -eq $branch)
+        Matches = ($head -ceq $branch)
     }
 }
