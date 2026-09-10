@@ -1,8 +1,13 @@
 <#
 .SYNOPSIS
-    Stop hook -- logs session end to session_log.md of the active demand.
-    Detects uncommitted files across monitored repos and appends them to the current day's entry.
-    Claude writes the description before closing; this hook appends files and syncs git.
+    Stop hook -- records the active demand's uncommitted files in its session_log.md, then syncs
+    git. Fires after EVERY assistant response (Stop event, once per turn), so it is idempotent
+    (see the "replace -- do not accumulate" block). It does NOT touch any session state (demand
+    file, markers, heartbeat, active_demands.txt): that cleanup is the exclusive responsibility of
+    hook_session_end.ps1 (SessionEnd event), which fires once when the session truly ends. Before
+    this split, Stop tried to distinguish mid-turn from /exit by checking activeFlag presence and
+    cleaned up state itself -- that caused a false-dead-session bug (the flag looked "gone" during
+    any normal gap between turns of a live session), fixed 2026-07-14.
 #>
 
 $worklogRoot = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else {
@@ -23,13 +28,11 @@ try {
 
 # No JSONL-based fallback: with multiple sessions sharing the same Claude project directory,
 # "most recently modified jsonl" can belong to ANY active session, not just the caller --
-# confirmed to cause cross-session state corruption (2026-07-01). Failing safe (skip cleanup
+# confirmed to cause cross-session state corruption (2026-07-01). Failing safe (skip logging
 # for this call) is preferable to silently guessing the wrong identity.
 
-# Session files keyed by session_id -- stable and identical in inject and Stop hooks
-$demandFile    = if ($sessionId) { "$env:TEMP\claude_demand_$sessionId.txt"  } else { $null }
-$activeFlag    = if ($sessionId) { "$env:TEMP\claude_active_$sessionId.flag" } else { $null }
-$sessionMarker = if ($sessionId) { "$env:TEMP\claude_ctx_$sessionId.marker"  } else { $null }
+# Session file keyed by session_id -- stable and identical across all hooks
+$demandFile = if ($sessionId) { "$env:TEMP\claude_demand_$sessionId.txt" } else { $null }
 
 # Ticket: demand file by session_id (written by inject hook)
 $ticket = $null
@@ -38,14 +41,15 @@ if ($demandFile -and (Test-Path $demandFile)) {
     if ($ticket) { $ticket = $ticket.Trim() }
 }
 
-# Legacy fallback: current_demand.txt
-if (-not $ticket) {
-    $currentFile = "$worklogRoot\current_demand.txt"
-    if (Test-Path $currentFile) {
-        $ticket = (Get-Content $currentFile -Raw -Encoding utf8).Trim()
-    }
-}
-
+# NO shared-file fallback -- deliberate.
+# Until 2026-07-28 there was a fallback to current_demand.txt here. Since that file was written by
+# new-demand.ps1 and never updated on demand switches, a session with NO demand (stand-by, or after
+# standby.ps1) appended its uncommitted files to the session_log.md of some old demand -- silently
+# corrupting the audit trail. It was unobservable in practice because the file was usually empty;
+# introducing last_demand.txt (a resume point that is always populated) would have made the
+# fallback wrong in every stand-by session.
+# Rule: the audit trail is never inferred. With no demand file for this session, there is nothing
+# to record.
 if (-not $ticket) { exit 0 }
 
 $ticketDir  = "$worklogRoot\worklogs\$ticket"
@@ -56,45 +60,68 @@ $gitUser = (git -C $worklogRoot config user.name 2>$null)
 if ($gitUser) { $gitUser = $gitUser.Trim() }
 if (-not $gitUser) { $gitUser = $env:USERNAME }
 
-# Read monitored repos from repos.conf
-function Read-ReposConf {
-    param([string]$confPath)
-    $result = [ordered]@{}
-    if (-not (Test-Path $confPath)) { return $result }
-    foreach ($line in Get-Content $confPath -Encoding utf8) {
-        $line = $line.Trim()
-        if (-not $line -or $line.StartsWith('#')) { continue }
-        $idx = $line.IndexOf('=')
-        if ($idx -lt 0) { continue }
-        $alias = $line.Substring(0, $idx).Trim()
-        $path  = $line.Substring($idx + 1).Trim()
-        if ($alias -and $path) { $result[$alias] = $path }
+. "$worklogRoot\scripts\repos_lib.ps1"   # Get-Repos (alias, path, per-repo worktree preference)
+
+# --- Collecting uncommitted files: ATTRIBUTION BY EVIDENCE ------------------------------------
+# Until 2026-07-28 this block scanned every repo in repos.conf and appended the result to THIS
+# session's demand log. With parallel sessions sharing those working trees, one demand's work showed
+# up in the other demands' logs -- corrupting the very source of truth of the audit trail (real
+# case: files from one demand recorded in two other demands' logs).
+#
+# Now only work with evidence of belonging to this demand is included:
+#   1. a git worktree under worklogs/<TICKET>/ -- the path itself identifies the demand;
+#   2. a monitored repo whose current branch is "<TICKET>" or ends with "/<TICKET>".
+# A monitored repo sitting on main/dev or on another demand's branch is NOT included: it is not
+# this demand's work.
+#
+# CONSEQUENCE, on purpose: if you work without a per-demand branch and without a per-demand
+# worktree, there is no evidence to attribute, so no uncommitted-files block is written. Silence is
+# correct here -- the previous behavior filled the log with other demands' files.
+#
+# Both forms of evidence are always checked, whatever the repository's worktree preference says. The
+# preference records what the user chose to DO (see scripts/repo-worktree.ps1); it is not a filter on
+# what counts as evidence. A repo set to worktree=no that happens to have a worktree from before the
+# choice must still have its work attributed.
+$repos = @(Get-Repos -ConfPath "$worklogRoot\repos.conf")
+
+# Sources to inspect: @{ Label; Path }
+$sources = [System.Collections.Generic.List[object]]::new()
+
+# 1. Worktrees of this demand
+foreach ($d in @(Get-ChildItem $ticketDir -Directory -EA SilentlyContinue)) {
+    if (Test-Path (Join-Path $d.FullName ".git")) {
+        $sources.Add([pscustomobject]@{ Label = $d.Name; Path = $d.FullName })
     }
-    return $result
 }
 
-$repos = Read-ReposConf "$worklogRoot\repos.conf"
+# 2. Monitored repos checked out on this demand's branch
+foreach ($repo in $repos) {
+    if (-not (Test-Path $repo.Path)) { continue }
+    $branch = (git -C $repo.Path branch --show-current 2>$null)
+    if ($branch) { $branch = $branch.Trim() }
+    if ($branch -and ($branch -eq $ticket -or $branch.EndsWith("/$ticket"))) {
+        $sources.Add([pscustomobject]@{ Label = "$($repo.Alias):main-copy"; Path = $repo.Path })
+    }
+}
 
-$modifiedRepos = @()
-$allFiles      = @()
+$allFiles = @()
 
-foreach ($entry in $repos.GetEnumerator()) {
-    $repoPath = $entry.Value
-    if (-not (Test-Path $repoPath)) { continue }
-
-    Push-Location $repoPath
+foreach ($source in $sources) {
+    Push-Location $source.Path
     try {
-        $unstaged  = git diff --name-only 2>$null
-        $staged    = git diff --name-only --cached 2>$null
-        $untracked = git ls-files --others --exclude-standard 2>$null
-
-        $files = ($unstaged + $staged + $untracked) |
+        # @() is mandatory on each call: git returns a String when the output has ONE line and an
+        # Object[] when it has two or more. With a String on the left-hand side, PowerShell's "+"
+        # concatenates TEXT instead of adding collections, gluing two paths into a single entry
+        # ("notes.md" + "todo.md" -> "notes.mdtodo.md"). Real bug found 2026-07-28 -- it only shows
+        # up when each command returns 0 or 1 file, which is why it stayed invisible for months.
+        $files = (@(git diff --name-only 2>$null) +
+                  @(git diff --name-only --cached 2>$null) +
+                  @(git ls-files --others --exclude-standard 2>$null)) |
             Where-Object { $_ } |
             Sort-Object -Unique
 
         if ($files) {
-            $modifiedRepos += $entry.Key
-            $allFiles += $files | ForEach-Object { "[$($entry.Key)] $_" }
+            $allFiles += @($files | ForEach-Object { "[$($source.Label)] $_" })
         }
     } finally {
         Pop-Location
@@ -109,10 +136,16 @@ if ($allFiles.Count -gt 0) {
     if ($allFiles.Count -gt 10) {
         $list += "`n- ... and $($allFiles.Count - 10) more file(s)"
     }
-    $reposStr    = $modifiedRepos -join ', '
     $newBlock    = "Uncommitted files:`n- $list"
     $todayHeader = "## $today $gitUser"
 
+    # The hook does NOT create the day's section -- deliberate.
+    # Until 2026-07-28 it Add-Content'ed a "## date user / (no description)" section just to record
+    # open files. That polluted the audit trail with empty entries and leaked outside the worklog for
+    # anyone mirroring the day's section into an external sprint tool.
+    # The day's section is the record of what was done -- the responsibility of whoever did the work,
+    # not of a hook. Without the section the block is simply not written; day-report.ps1 already
+    # flags the absence under "Commits with no session_log entry".
     if (Test-Path $sessionLog) {
         $lines    = Get-Content $sessionLog -Encoding utf8
         $todayIdx = -1
@@ -151,80 +184,74 @@ if ($allFiles.Count -gt 0) {
                 $after  = if ($sectionEnd -lt $lines.Count) { $lines[$sectionEnd..($lines.Count-1)] } else { @() }
                 ($before + "" + $newBlock.Split("`n") + $after) | Set-Content $sessionLog -Encoding utf8
             }
-        } else {
-            $newSection = "`n## $today $gitUser`n`n(no description)`n`nRepos: $reposStr`n`n$newBlock"
-            Add-Content -Path $sessionLog -Value $newSection -Encoding utf8
         }
-    } else {
-        $content = "# $ticket`n`n## $today $gitUser`n`n(no description)`n`nRepos: $reposStr`n`n$newBlock"
-        Set-Content -Path $sessionLog -Value $content -Encoding utf8
+        # No section for today: nothing to do (see the comment above).
     }
+    # No session_log.md at all: same -- the file is created when the first session is recorded,
+    # not by the hook.
 }
 
-# Detect mid-turn vs /exit:
-# The inject hook creates/updates claude_active_{session_id}.flag on every message.
-# If the flag exists: Stop fired after a normal response (mid-turn) -- remove flag, skip cleanup.
-# If the flag does not exist: Stop fired by /exit -- clean up markers and active_demands.txt.
-
-# Retry before concluding absence: confirmed (2026-07-01, live debugging) that Test-Path can
-# fail transiently under heavy concurrent I/O in %TEMP% (multiple Claude sessions touching the
-# same files), making this hook treat mid-turn as /exit by mistake.
-$activeFlagExists = $activeFlag -and (Test-Path $activeFlag)
-if (-not $activeFlagExists -and $activeFlag) {
-    Start-Sleep -Milliseconds 150
-    $activeFlagExists = Test-Path $activeFlag
-}
-
-if ($activeFlagExists) {
-    Remove-Item $activeFlag -Force -ErrorAction SilentlyContinue
-} else {
-    $activeFile = "$worklogRoot\active_demands.txt"
-
-    # Same lock used by hook_context_inject.ps1 -- protects active_demands.txt and the
-    # claude_demand_*/claude_ctx_*/claude_active_* files against races between concurrent
-    # sessions (confirmed to cause real state corruption/loss, live debugging 2026-07-01).
-    $worklogMutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
-    $worklogMutexAcquired = $false
-    try {
-        try {
-            $worklogMutexAcquired = $worklogMutex.WaitOne(10000)
-        } catch [System.Threading.AbandonedMutexException] {
-            $worklogMutexAcquired = $true
-        }
-
-        if ((Test-Path $activeFile) -and $ticket) {
-            $lines = @(Get-Content $activeFile -Encoding utf8 | Where-Object { $_.Trim() })
-            if ($lines.Count -gt 1) {
-                ($lines | Where-Object { $_.Trim() -ne $ticket }) | Set-Content $activeFile -Encoding utf8
-            }
-        }
-        if ($sessionMarker) { Remove-Item $sessionMarker -Force -EA SilentlyContinue }
-        if ($demandFile)    { Remove-Item $demandFile    -Force -EA SilentlyContinue }
-        if ($activeFlag)    { Remove-Item $activeFlag    -Force -EA SilentlyContinue }
-    } finally {
-        if ($worklogMutexAcquired) { $worklogMutex.ReleaseMutex() }
-        $worklogMutex.Dispose()
-    }
-}
-
-# Commit everything before pull -- prevents rebase failure from uncommitted files
-Push-Location $worklogRoot
+# Sync with the team on every Stop: local commit -> pull --rebase -> push.
+# It lives here (not in SessionEnd) because Stop fires every turn and is reliable; SessionEnd is
+# hard-killed on /exit (anthropics/claude-code#70465), so it was never a safe place for a git sync.
+# Commit everything before the pull -- prevents rebase failure from uncommitted files.
+# On conflict with a teammate (someone edited a file also modified here), ABORT the rebase and defer
+# the push to the next Stop -- never leave a rebase stuck, which breaks every subsequent hook in the
+# session.
+#
+# The WHOLE block runs under the global mutex (Global\ClaudeWorklogStateLock -- the same one used for
+# active_demands and for the inject hook's pull): several sessions on this machine share ONE working
+# tree, and two concurrent `git` processes on the same .git produce index.lock / rejected push /
+# stuck rebase. The mutex serializes add/commit/pull/push across sessions. High timeout (a push can
+# be slow); if it cannot acquire, proceed anyway -- better to sync without the lock than never.
+$syncMutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
+$syncMutexAcquired = $false
 try {
-    $pending = @(git status --porcelain 2>$null) | Where-Object { $_ }
-    if ($pending.Count -gt 0) {
-        $list = ($pending | Select-Object -First 10 | ForEach-Object { $_.TrimStart() }) -join ', '
-        if ($pending.Count -gt 10) { $list += " ... and $($pending.Count - 10) more" }
-        git add -A
-        git commit -m "auto-commit on close [$ticket] - identify: $list"
+    try { $syncMutexAcquired = $syncMutex.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $syncMutexAcquired = $true }
+
+    Push-Location $worklogRoot
+    try {
+        $pending = @(git status --porcelain 2>$null | Where-Object { $_ })
+        if ($pending.Count -gt 0) {
+            # Strip the double quotes --porcelain wraps around names containing spaces: embedded in
+            # the commit message, PowerShell 5.1 mangled them while passing -m to the native git
+            # (message split -> "pathspec did not match" -> commit failed -> files stayed staged ->
+            # pull --rebase failed -> nothing was ever pushed). Writing the message to a file and
+            # using `git commit -F` removes the quoting problem entirely.
+            $list = ($pending | Select-Object -First 10 | ForEach-Object { $_.TrimStart() -replace '"', '' }) -join ', '
+            if ($pending.Count -gt 10) { $list += " ... and $($pending.Count - 10) more" }
+            git add -A
+            # The message used to say "on close", but this is the `Stop` hook -- it fires EVERY
+            # turn. The history filled up with several "on close" commits per day for the same
+            # demand, which makes auditing by commit harder (and hook_session_end.ps1 commits
+            # nothing, so the text described nobody's event). The "identify:" prefix went too: it
+            # was a leftover instruction, and the list already carries the `git status --porcelain`
+            # status code. Keep `[TICKET]` in the message: day-report.ps1 groups commits from the
+            # monitored repos by that token and uses it for the divergence marker.
+            $commitMsg = "auto-commit for turn [$ticket] - $list"
+            $msgFile = [System.IO.Path]::GetTempFileName()
+            [System.IO.File]::WriteAllText($msgFile, $commitMsg, (New-Object System.Text.UTF8Encoding $false))
+            git commit -F $msgFile
+            Remove-Item $msgFile -Force -ErrorAction SilentlyContinue
+        }
+
+        git pull --rebase origin main
+        if ($LASTEXITCODE -eq 0) {
+            git push origin main
+        } else {
+            git rebase --abort   # conflict with a teammate -- push waits for the next Stop
+        }
+
+        # Sync stamp. This block has just pulled from the remote; the NEXT turn's inject hook reads
+        # the stamp and skips its own pull when it is recent. Without it there were two round trips
+        # per conversation cycle, separated only by the time the user spent typing.
+        # It is per MACHINE, not per session: every session shares the same working tree, so a pull
+        # by any one of them updates the checkout for all.
+        Set-Content "$env:TEMP\claude_worklog_sync.stamp" -Value (Get-Date -Format 'o') -Encoding utf8
+    } finally {
+        Pop-Location
     }
 } finally {
-    Pop-Location
-}
-
-# Sync
-git -C $worklogRoot pull --rebase origin main
-if ($LASTEXITCODE -eq 0) {
-    git -C $worklogRoot add $ticketDir
-    git -C $worklogRoot commit -m "log: $ticket $(Get-Date -Format 'yyyy-MM-dd') [$gitUser]" 2>$null
-    git -C $worklogRoot push origin main
+    if ($syncMutexAcquired) { $syncMutex.ReleaseMutex() }
+    $syncMutex.Dispose()
 }

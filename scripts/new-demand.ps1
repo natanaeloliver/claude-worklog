@@ -1,6 +1,22 @@
 <#
 .SYNOPSIS
-    Creates a new demand in the claude-worklog system.
+    Creates the STRUCTURE of a demand: the worklogs/<TICKET>/ folder and a CONTEXT.md scaffolded
+    from the template. No session, no active demand.
+
+.DESCRIPTION
+    Structure only. It does NOT write last_demand.txt, does NOT write active_demands.txt and does
+    NOT touch any session file -- running it while another Claude session is live is safe.
+
+    Why the split exists: this script used to write the ticket into last_demand.txt, the resume
+    point (fallback 4 of hook_context_inject.ps1). Creating the folder for a new ticket while
+    another session was working on a different demand STOLE that resume point, and the next session
+    opened without a window reservation -- including the same window reopening claude after an
+    /exit -- came up on the freshly created demand. The real cost was creating demand folders by
+    hand to avoid trampling a live session.
+
+    To work on the demand once it exists:
+      open-parallel.ps1 -ticket <T>                       (new window; it guarantees the structure)
+      switch-demand.ps1 -ticket <T> -sessionId <uuid>     (current session)
 
 .PARAMETER ticket
     Ticket ID. Examples: "PROJ-001", "TSK-123", "ISSUE-42"
@@ -37,7 +53,6 @@ param(
 $worklogRoot  = if ($env:WORKLOG_PATH) { $env:WORKLOG_PATH } else { $PSScriptRoot | Split-Path -Parent }
 $demandDir    = "$worklogRoot\worklogs\$ticket"
 $contextFile  = "$demandDir\CONTEXT.md"
-$currentFile  = "$worklogRoot\current_demand.txt"
 $templateFile = "$worklogRoot\templates\CONTEXT_template.md"
 
 if (-not (Test-Path $templateFile)) {
@@ -45,13 +60,10 @@ if (-not (Test-Path $templateFile)) {
     exit 1
 }
 
+# Idempotent and NON-interactive: open-parallel.ps1 calls this script unattended, and the old
+# "activate it as current demand?" prompt was exactly the coupling removed here.
 if (Test-Path $contextFile) {
-    Write-Host "Demand $ticket already exists: $contextFile" -ForegroundColor Yellow
-    $answer = Read-Host "Activate it as current demand? (y/N)"
-    if ($answer -match '^[yY]$') {
-        Set-Content -Path $currentFile -Value $ticket -Encoding utf8
-        Write-Host "Demand $ticket activated." -ForegroundColor Green
-    }
+    Write-Host "Demand $ticket already has a structure: $contextFile" -ForegroundColor Yellow
     exit 0
 }
 
@@ -84,7 +96,6 @@ $content = $content `
     -replace '\{NEXT_ACTION\}',  "TODO: define the first next step"
 
 Set-Content -Path $contextFile -Value $content -Encoding utf8
-Set-Content -Path $currentFile -Value $ticket  -Encoding utf8
 
 # Sync to shared repository
 git -C $worklogRoot pull --rebase origin main
@@ -95,13 +106,12 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Host ""
-Write-Host "Demand $ticket created." -ForegroundColor Green
+Write-Host "Structure for demand $ticket created." -ForegroundColor Green
 Write-Host ""
 Write-Host "  Context: $contextFile"
-Write-Host "  Active:  $currentFile"
 Write-Host ""
-Write-Host "Next steps:" -ForegroundColor Cyan
+Write-Host "No active demand was changed. Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Edit CONTEXT.md: code `"$contextFile`""
-Write-Host "  2. Open Claude in your working repository"
-Write-Host "  3. Claude will automatically read the demand context"
+Write-Host "  2. New window for this demand: scripts\open-parallel.ps1 -ticket $ticket"
+Write-Host "  3. Or in the current session: scripts\switch-demand.ps1 -ticket $ticket -sessionId <scratchpad-uuid>"
 Write-Host ""

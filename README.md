@@ -17,8 +17,8 @@ data pipeline), this adds up fast.
 - **Injects context automatically** — the `UserPromptSubmit` hook injects the active
   demand's `CONTEXT.md` at the start of every session, so Claude knows exactly where you
   left off
-- **Logs sessions automatically** — the `Stop` hook appends uncommitted files to an audit
-  trail when you close Claude
+- **Logs sessions automatically** — the `Stop` hook records the demand's uncommitted files in
+  an audit trail and syncs git, once per turn
 - **Tracks demands as structured files** — each demand has a `CONTEXT.md` (current state)
   and `session_log.md` (audit trail), committed to a shared git repository
 - **Supports parallel sessions** — multiple team members can work simultaneously on
@@ -30,14 +30,80 @@ data pipeline), this adds up fast.
 claude-worklog (this repo)
     │
     ├── worklogs/TICKET-123/CONTEXT.md     ← Claude reads at session start
-    └── worklogs/TICKET-123/session_log.md ← hooks write at session end
+    └── worklogs/TICKET-123/session_log.md ← hooks write during the session
 
 UserPromptSubmit hook (fires on first message)
-    └── reads CONTEXT.md → injects as context into the session
+    └── resolves the demand → injects CONTEXT.md as context into the session
 
-Stop hook (fires when Claude closes)
-    └── detects uncommitted files across repos → appends to session_log.md → git sync
+Stop hook (fires once per turn)
+    └── records this demand's uncommitted files in session_log.md → git sync
+
+SessionEnd hook (fires once, at the true /exit)
+    └── clears session state → writes last_demand.txt (the resume point)
+                             → appends one line to logs/sessions_ended.jsonl
 ```
+
+That last line is what makes a crash recoverable. When several sessions die at once this hook runs
+in all of them, each removes its own ticket from `active_demands.txt`, and `last_demand.txt` is
+single-valued — so all but one demand left no trace at all. The record is a **log, never state**:
+nothing resolves a demand from it, and `scripts/resume-sessions.ps1` is its only consumer.
+
+### Demand resolution order
+
+The inject hook resolves which demand belongs to the session, in this order:
+
+1. the session's own demand file (survives restarting Claude in the same tab)
+2. the reservation bound to this window, made by `open-parallel.ps1` (see [Parallel
+   Sessions](#parallel-sessions)), consumed once and then gone
+3. the legacy FIFO queue, kept only to drain a reservation still in flight from an older version;
+   nothing writes to it any more
+4. `active_demands.txt` — first ticket that is neither claimed by another live session nor reserved
+   for a window that has not sent its first message yet
+5. `last_demand.txt` — the resume point, if it is not already open elsewhere
+
+Step 5 is what makes the first session of the day open with context instead of stand-by:
+`active_demands.txt` is ephemeral by design ("who has a live session right now"), so without a
+separate resume point, ending the last session erased every trace of the demand.
+
+Before resolving, the hook cleans up state left behind by sessions that ended without `SessionEnd`:
+orphan demand files, reservations older than 24h, and `active_demands.txt` entries with no session
+behind them at all. It runs **before** resolution on purpose. Running it afterwards fixed the file
+for the sessions that came next and never for the one that had just been handed the residue.
+
+### Which work gets logged (attribution by evidence)
+
+The `Stop` hook only records uncommitted files it can prove belong to the active demand:
+
+- a git worktree under `worklogs/<TICKET>/`, or
+- a monitored repo whose current branch is `<TICKET>` or ends with `/<TICKET>`
+
+A monitored repo sitting on `main` or on another demand's branch is not recorded. This matters with
+parallel sessions: those working trees are shared, so a global scan credited one demand's work to
+another and corrupted the audit trail. The trade-off is explicit — **if you work without a
+per-demand branch or worktree, no uncommitted-files block is written**. The hook also never creates
+the day's section in `session_log.md`; that section is the record of what was done, written by you,
+and `day-report.ps1` flags demands that have commits but no entry.
+
+### Worktree per demand is optional, per repository
+
+Using a git worktree per demand lets you work on several demands in parallel without stashing, and
+keeps the main copy on a stable branch. But a fresh worktree is an empty working directory:
+everything git does not track has to be rebuilt there — dependencies, local `.env` files, generated
+clients, seeded local databases. For a small repository that costs seconds; for an application
+repository it is a full reinstall and reconfiguration on every demand, which is rework.
+
+So the choice belongs to each repository. Claude asks once, the first time it needs to change a given
+repository for a demand, and records the answer in `repos.conf`:
+
+```powershell
+.\scripts\repo-worktree.ps1                        # list every repo and its preference
+.\scripts\repo-worktree.ps1 -Alias backend         # -> yes | no | ask
+.\scripts\repo-worktree.ps1 -Alias backend -Use no # record it (stops the question repeating)
+```
+
+`ask` means not answered yet. `no` means work happens in the main copy on a branch named after the
+demand — which the `Stop` hook recognizes as evidence just as well as a worktree, so the audit trail
+works either way.
 
 ## Quick Start
 
@@ -61,6 +127,12 @@ code repos.conf
 .\scripts\new-demand.ps1 -ticket "PROJ-001" -name "My first demand"
 ```
 
+This creates the demand's **structure only** — it does not activate it and does not touch any live
+session's state, so it is safe to run while you are working on something else. To actually work on
+it, open a window for it (`.\scripts\open-parallel.ps1 -ticket "PROJ-001"`, which creates the
+structure for you if it does not exist yet) or switch the current session with
+`.\scripts\switch-demand.ps1`.
+
 **4. Open Claude** inside this directory (the hub) — not inside your other repos:
 ```powershell
 cd C:\path\to\claude-worklog
@@ -79,14 +151,24 @@ claude-worklog/
 ├── hooks/
 │   ├── windows/
 │   │   ├── hook_context_inject.ps1   # UserPromptSubmit hook
-│   │   └── hook_session_log.ps1      # Stop hook
+│   │   ├── hook_session_log.ps1      # Stop hook
+│   │   ├── hook_session_end.ps1      # SessionEnd hook
+│   │   └── hook_stop_failure_log.ps1 # StopFailure hook (optional, measurement only)
 │   └── bash/                         # Bash hooks (PRs welcome)
 ├── scripts/
-│   ├── new-demand.ps1                # Create a new demand
+│   ├── new-demand.ps1                # Create a demand's structure (does not activate it)
 │   ├── switch-demand.ps1             # Switch active demand mid-session
-│   ├── open-parallel.ps1             # Open parallel session in new window
+│   ├── open-parallel.ps1             # Open a demand in a new window
+│   ├── resume-sessions.ps1           # List session endings, resume a dead session
 │   ├── standby.ps1                   # Clear active demand
-│   └── day-report.ps1                # Daily activity summary
+│   ├── day-report.ps1                # Daily activity summary
+│   ├── stopfailure-report.ps1        # Reads the StopFailure log, prints the verdict
+│   ├── repo-worktree.ps1             # Per-repo worktree preference (asked once)
+│   ├── active_demands_lib.ps1        # Shared state read/write (self-healing + atomic)
+│   ├── session_lib.ps1               # Session identity/liveness + the /rename tab name
+│   └── repos_lib.ps1                 # repos.conf read/write (paths + preferences)
+├── tests/
+│   └── test-demand-resolution.ps1    # 68 checks in an isolated sandbox
 ├── templates/
 │   ├── CONTEXT_template.md           # Demand context scaffold
 │   └── CLAUDE.md.template            # CLAUDE.md template for team repos
@@ -147,6 +229,63 @@ For more efficient work, you can open different demands simultaneously in separa
 
 Each session independently tracks its active demand. Claude warns if two sessions open
 the same demand, preventing accidental concurrent edits to `CONTEXT.md` and `session_log.md`.
+
+The demand is handed to the new window by a reservation bound to that window, not by its position in
+`active_demands.txt` and not by a shared queue. `open-parallel.ps1` generates a token, writes the
+ticket into a reservation file keyed by it, and exports the token into the environment that Windows
+Terminal propagates to the new window and to no other. The first message of that window consumes the
+reservation, once.
+
+A queue cannot do this job: it is global, and the hook pops the first item on `UserPromptSubmit`.
+The initial prompt does not fire that event, so the pop waits for the human to type, and what pairs
+ticket with window becomes the order of typing rather than the order of opening. Since a new window
+comes to the front, the first thing typed lands in the last window opened and consumes the first
+reservation, so two windows opened back-to-back get swapped, systematically rather than by luck.
+
+`open-parallel.ps1` also guarantees the demand's structure before reserving anything: the hook only
+accepts a reservation for a demand that has a folder, so opening a ticket that has none would
+silently fall through to another session's demand. Pass `-name` and the folder is created first.
+
+The new window's tab is renamed to the demand, by passing `/rename <ticket> <title>` as Claude's
+initial prompt — a local CLI command, so it costs no API turn. With parallel windows the tab title
+is the only thing that says which demand each one is serving.
+
+### Recovering after a crash
+
+```powershell
+.\scripts\resume-sessions.ps1                     # list recent session endings
+.\scripts\resume-sessions.ps1 -LastCrash -DryRun  # check what would be reopened
+.\scripts\resume-sessions.ps1 -LastCrash
+```
+
+It reads `logs/sessions_ended.jsonl` (falling back to Claude Code's own transcripts for sessions
+that predate the record) and reopens each dead session with `claude --resume <session_id>`, so the
+conversation comes back rather than starting over on the same demand. Live sessions are filtered out
+of the list, which is not cosmetic: `-LastCrash` anchors its window on the most recent ending, and a
+live session's transcript is always the most recently written file.
+
+Delivery here is the resumed session's own demand file — fallback 1, which wins over everything
+else. A resume must never go through any first-come-first-served channel: identity is already known
+(the `session_id`), and routing it through a shared one lets another live session consume it and
+walk off with the ticket.
+
+## Tests
+
+```powershell
+powershell -NoProfile -File tests\test-demand-resolution.ps1
+```
+
+68 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
+never touched): the demand resolution chain, the guard against reopening a demand that is already
+live, `Stop` refusing to log without a demand file, attribution by evidence, self-healing of a
+corrupted `active_demands.txt`, pruning of orphan entries, the window-bound reservation, session
+identity against a recycled PID, the per-turn commit message and sync stamp, `new-demand.ps1`
+leaving the resume point alone, ASCII-safe hook output, and path resolution in `repos.conf`.
+Run it after changing any hook or script.
+
+Each known-bad case is paired with a positive control, so "fix everything by disabling the check"
+cannot pass: C21 (a recycled PID must read as dead) sits next to C22 (the same file with a fresh
+heartbeat must still read as alive), and C25's "resume point untouched" next to "structure created".
 
 ## Configuration
 

@@ -65,14 +65,14 @@ This script:
 1. Adds `$env:WORKLOG_PATH` to your PowerShell profile (`$PROFILE.CurrentUserAllHosts`)
 2. Confirms the project-level hooks (already shipped in `.claude\settings.json`) — no global
    change needed. They fire whenever you open `claude` inside this directory.
-3. Creates `active_demands.txt` and `current_demand.txt`
+3. Creates `active_demands.txt` and `last_demand.txt`
 4. Copies `repos.conf.example` to `repos.conf`
 
 **Prefer opening Claude directly inside each of your repos instead of staying in the hub?**
-Run `.\setup.ps1 -Global` instead — it additionally writes the two hooks to
+Run `.\setup.ps1 -Global` instead — it additionally writes the three hooks to
 `~\.claude\settings.json` (`UserPromptSubmit` → `hook_context_inject.ps1`, `Stop` →
-`hook_session_log.ps1`), which is a machine-wide setting affecting every Claude Code project,
-not just this one. See [README.md — Optional: multi-repo direct mode](README.md#optional-multi-repo-direct-mode)
+`hook_session_log.ps1`, `SessionEnd` → `hook_session_end.ps1`), which is a machine-wide setting
+affecting every Claude Code project, not just this one. See [README.md — Optional: multi-repo direct mode](README.md#optional-multi-repo-direct-mode)
 before choosing this.
 
 ---
@@ -193,16 +193,25 @@ Get-ChildItem "$env:WORKLOG_PATH\worklogs\" -Directory
 ## Troubleshooting
 
 **Context not injected at session start**
-- Check that `active_demands.txt` has a demand listed: `Get-Content "$env:WORKLOG_PATH\active_demands.txt"`
+- Check the two state files: `Get-Content "$env:WORKLOG_PATH\active_demands.txt"` and
+  `Get-Content "$env:WORKLOG_PATH\last_demand.txt"`. If both are empty you are in stand-by by
+  design — switch to a demand or create one
+- If `active_demands.txt` looks like one long line with every ticket glued together, that is
+  corruption from an interrupted write; it now self-heals on the next read, and
+  `tests\test-demand-resolution.ps1` covers it
 - Default (hub-only): verify you opened `claude` inside `$env:WORKLOG_PATH`, and that the hook
   is in this repo's `.claude\settings.json` under `UserPromptSubmit`
 - `-Global` mode: verify the hook is in `~\.claude\settings.json` under `UserPromptSubmit`
   instead, and that the hook script path in settings.json is correct and the file exists
 
-**Session log not updated after closing Claude**
-- The `Stop` hook only fires when Claude exits cleanly (via `/exit`)
-- Forced closes (window X button) may not trigger the hook
-- Verify `Stop` hook is configured in `~\.claude\settings.json`
+**Session log not updated**
+- The `Stop` hook fires once per turn, not only at exit, so a forced close does not lose the work
+  already committed
+- The uncommitted-files block is only written when there is evidence the work belongs to the active
+  demand: a worktree under `worklogs/<TICKET>/`, or a monitored repo on branch `<TICKET>` (or
+  `*/<TICKET>`). Working on `main` produces no block, on purpose
+- The hook never creates the day's `## <date> <user>` section — write it yourself (or ask Claude to);
+  the block attaches to an existing section
 
 **`git pull` fails in the hook**
 - Ensure the worklog repo remote is accessible (VPN if internal GitLab)
@@ -210,7 +219,18 @@ Get-ChildItem "$env:WORKLOG_PATH\worklogs\" -Directory
 
 **"demand not found" when switching**
 - The demand folder must exist under `worklogs/`
-- Create it first: `.\scripts\new-demand.ps1 -ticket "TICKET-ID" -name "Name"`
+- Create it first: `.\scripts\new-demand.ps1 -ticket "TICKET-ID" -name "Name"`. That creates the
+  structure only — it does not activate the demand, so follow it with `/switch-demand` or
+  `.\scripts\open-parallel.ps1 -ticket "TICKET-ID"`
+
+**A new window opened on the wrong demand**
+- The window reservation is only accepted when the demand already has a folder under `worklogs/`.
+  Open a brand-new ticket with `-name` so `open-parallel.ps1` creates the structure first
+
+**Several sessions died at once and their demands vanished from the state files**
+- Expected: each `SessionEnd` removes its own ticket, and `last_demand.txt` holds only one
+- Recover with `.\scripts\resume-sessions.ps1 -LastCrash` (add `-DryRun` to check first). It reads
+  `logs/sessions_ended.jsonl` and reopens each session with `claude --resume`
 
 ---
 
@@ -224,6 +244,8 @@ Morning
 During the day
   └─ Work normally — ask Claude to read/edit files in your other repos by absolute path
      (from repos.conf); it never needs you to cd into them
+  └─ The first time Claude changes a given repo for a demand, it asks once whether that repo
+     uses a worktree per demand; the answer is recorded in repos.conf and never asked again
   └─ Use /switch-demand if you need to move to another ticket
 
 End of day
@@ -240,8 +262,9 @@ working in" — the hook fires the same way either place.)
 
 | File | Purpose |
 |------|---------|
-| `active_demands.txt` | List of currently active demands (gitignored, per-user) |
-| `current_demand.txt` | Legacy single-demand pointer (gitignored, per-user) |
-| `repos.conf` | Your local repository paths (gitignored, per-user) |
+| `active_demands.txt` | Demands with a live session **right now** — ephemeral, empties when the sessions end (gitignored, per-user) |
+| `last_demand.txt` | **Resume point** — the last demand whose session ended; this is what makes the first session of the day open with context. Creating a demand does *not* write here (gitignored, per-user) |
+| `logs/sessions_ended.jsonl` | One line per session that ended, with its reason — the only trace left when several sessions die at once. Read by `scripts\resume-sessions.ps1` (gitignored, per-user) |
+| `repos.conf` | Your local repository paths **and per-repo preferences** such as `alias.worktree=yes\|no`. Paths may use `%VAR%`, and `<ALIAS>_PATH` overrides the file (gitignored, per-user) |
 | `worklogs/{TICKET}/CONTEXT.md` | Demand state — read by Claude at session start |
 | `worklogs/{TICKET}/session_log.md` | Audit trail — written by Claude + hooks |

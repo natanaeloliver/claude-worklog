@@ -60,9 +60,14 @@ if (-not $Global) {
 
     $injectHook = "$worklogRoot\hooks\windows\hook_context_inject.ps1"
     $stopHook   = "$worklogRoot\hooks\windows\hook_session_log.ps1"
+    # SessionEnd goes in too. It is the only actor that clears session state, writes the resume
+    # point and records the ending -- without it, -Global mode leaks a demand file and an
+    # active_demands.txt entry on every /exit, and a crash leaves nothing to resume from.
+    $endHook    = "$worklogRoot\hooks\windows\hook_session_end.ps1"
 
     $injectCmd = "powershell -NonInteractive -File `"$injectHook`""
     $stopCmd   = "powershell -NonInteractive -File `"$stopHook`""
+    $endCmd    = "powershell -NonInteractive -File `"$endHook`""
 
     if (Test-Path $claudeSettingsFile) {
         try {
@@ -96,6 +101,14 @@ if (-not $Global) {
         }
     ) -Force
 
+    $settings.hooks | Add-Member -NotePropertyName SessionEnd -NotePropertyValue @(
+        [pscustomobject]@{
+            hooks = @(
+                [pscustomobject]@{ type = "command"; command = $endCmd }
+            )
+        }
+    ) -Force
+
     $settings | ConvertTo-Json -Depth 10 | Set-Content $claudeSettingsFile -Encoding utf8
     Write-Host "      Hooks written to: $claudeSettingsFile" -ForegroundColor Green
     Write-Host "      WARNING: this applies to every Claude Code project on this machine." -ForegroundColor Yellow
@@ -104,19 +117,19 @@ if (-not $Global) {
 # 3. Create initial tracking files
 Write-Host "[3/4] Creating tracking files..." -ForegroundColor Yellow
 
-$activeFile  = "$worklogRoot\active_demands.txt"
-$currentFile = "$worklogRoot\current_demand.txt"
+$activeFile = "$worklogRoot\active_demands.txt"
+$lastFile   = "$worklogRoot\last_demand.txt"
 
-$activeExisted  = Test-Path $activeFile
-$currentExisted = Test-Path $currentFile
+$activeExisted = Test-Path $activeFile
+$lastExisted   = Test-Path $lastFile
 
-if (-not $activeExisted)  { New-Item -ItemType File -Path $activeFile  -Force | Out-Null }
-if (-not $currentExisted) { New-Item -ItemType File -Path $currentFile -Force | Out-Null }
+if (-not $activeExisted) { New-Item -ItemType File -Path $activeFile -Force | Out-Null }
+if (-not $lastExisted)   { New-Item -ItemType File -Path $lastFile   -Force | Out-Null }
 
-if ($activeExisted -and $currentExisted) {
-    Write-Host "      active_demands.txt and current_demand.txt already exist. Skipping." -ForegroundColor DarkGray
+if ($activeExisted -and $lastExisted) {
+    Write-Host "      active_demands.txt and last_demand.txt already exist. Skipping." -ForegroundColor DarkGray
 } else {
-    Write-Host "      active_demands.txt and current_demand.txt created." -ForegroundColor Green
+    Write-Host "      active_demands.txt and last_demand.txt created." -ForegroundColor Green
 }
 
 # 4. Copy repos.conf.example if repos.conf doesn't exist

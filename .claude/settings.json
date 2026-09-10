@@ -19,6 +19,16 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NonInteractive -File hooks/windows/hook_session_end.ps1"
+          }
+        ]
+      }
     ]
   }
 }

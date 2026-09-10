@@ -1,9 +1,17 @@
-# Active demand tracking (per-user, not shared)
+# Demand state tracking (per-user, per-machine, never shared)
 active_demands.txt
+last_demand.txt
+# Retired in favor of last_demand.txt, kept ignored on purpose: a residual copy can reappear and,
+# without this line, the Stop hook's `git add -A` commits local state into the repository.
 current_demand.txt
 
 # Repository configuration (per-user paths)
 repos.conf
+
+# Local logs -- per-user, per-machine, and they hold local paths and session ids.
+# sessions_ended.jsonl feeds scripts/resume-sessions.ps1; stopfailure_events.jsonl feeds
+# scripts/stopfailure-report.ps1. Both are LOG, never state: nothing resolves a demand from them.
+logs/
 
 # Demand content files (binary, large, or sensitive)
 worklogs/**/*.csv
