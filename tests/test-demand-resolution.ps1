@@ -599,9 +599,25 @@ Set-Content "$sandTmp\claude_demand_sidGhost32.txt" "PROJ-AAAA`n$PID`n$ownCreate
 New-Item -ItemType File -Path "$sandTmp\claude_active_sidGhost32.flag" -Force | Out-Null
 
 Invoke-Hook 'hook_context_inject.ps1' 'sid32' | Out-Null
-$raw32 = @(([System.IO.File]::ReadAllText($activeFile) -split "
-?
-") | Where-Object { $_.Trim() })
+
+# Bounded retry, and the BOM comes off before comparing. Two separate reasons:
+#   1. The FIRST read right after the hook can still return the pre-write content. File.Replace
+#      is atomic -- no torn file ever -- but cross-process visibility of the replaced content is
+#      not instantaneous here: measured 3 runs out of 3 reading the stale content, and 3 out of 3
+#      reading the new one with a 300ms sleep or with a single discarded read in front
+#      (2026-09-10). Waiting cannot hide the defect this case exists for: with the tickets glued
+#      the file stays at ONE line forever, so the loop only stops measuring the wrong instant.
+#   2. Set-ActiveDemands writes UTF8 WITH BOM, so the first entry reads as "<BOM>PROJ-AAAA".
+#      Untrimmed, the glued form arrives as "<BOM>PROJ-AAAAPROJ-BBBB" and `-contains` never
+#      matches -- the second check would pass over a corrupt file, which is the one thing it is
+#      here to catch.
+$raw32 = @()
+for ($i = 0; $i -lt 20; $i++) {
+    $raw32 = @(([System.IO.File]::ReadAllText($activeFile) -split "\r?\n") |
+        ForEach-Object { $_.Trim([char]0xFEFF).Trim() } | Where-Object { $_ })
+    if ($raw32.Count -ge 2) { break }
+    Start-Sleep -Milliseconds 50
+}
 Check 'C32 two separate lines' '2'     ([string]$raw32.Count)
 Check 'C32 nothing glued'      'False' ([string]($raw32 -contains 'PROJ-AAAAPROJ-BBBB'))
 
