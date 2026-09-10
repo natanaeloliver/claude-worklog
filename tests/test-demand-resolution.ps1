@@ -26,6 +26,7 @@ New-Item -ItemType Directory -Force -Path "$sandbox\scripts", "$sandbox\worklogs
 Copy-Item "$real\scripts\active_demands_lib.ps1" "$sandbox\scripts\"
 Copy-Item "$real\scripts\repos_lib.ps1" "$sandbox\scripts\"
 Copy-Item "$real\scripts\session_lib.ps1" "$sandbox\scripts\"
+Copy-Item "$real\scripts\sync_lib.ps1" "$sandbox\scripts\"
 # new-demand.ps1 scaffolds from the templates folder under $WORKLOG_PATH, so the sandbox needs it.
 New-Item -ItemType Directory -Force -Path "$sandbox\templates" | Out-Null
 Copy-Item "$real\templates\CONTEXT_template.md" "$sandbox\templates\"
@@ -39,7 +40,10 @@ Set-Content "$sandbox\repos.conf" "# alias=path`n" -Encoding utf8
 # The sandbox must be a git repo: the hooks run git config/status/add/commit against the root.
 # With no remote configured, pull/push fail and the output is discarded -- what matters here is the
 # effect on the state files and on session_log.md.
-Invoke-Git -C $sandbox init -q | Out-Null
+# -b main pins the branch name: the hooks sync only while HEAD is the branch WORKLOG_BRANCH names,
+# whose default is `main`, and `init` alone would follow this machine's init.defaultBranch (often
+# `master`) -- which would make every commit check below measure the guard instead of the commit.
+Invoke-Git -C $sandbox init -q -b main | Out-Null
 Invoke-Git -C $sandbox config user.email "test@local" | Out-Null
 Invoke-Git -C $sandbox config user.name "test" | Out-Null
 Invoke-Git -C $sandbox add -A | Out-Null
@@ -524,6 +528,61 @@ $env:DELTA_PATH = "$sandbox\override-delta"
 $r27b = @(Get-Repos -ConfPath $conf27)
 $env:DELTA_PATH = $null
 Check 'C27 <ALIAS>_PATH wins' "$sandbox\override-delta" (($r27b | Where-Object { $_.Alias -eq 'delta' }).Path)
+
+# ---------------------------------------------------------------------------
+# C28/C29/C30: WORKLOG_BRANCH -- the hub syncs only while HEAD is the branch it names.
+#      Hardcoding `origin main` was wrong in two ways anywhere else: the pull rebased the CURRENT
+#      branch onto origin/main, and the push shipped the stale local `main` ref instead of HEAD, so
+#      the commit never left the machine. C28 is the mismatch (the variable pointed at a branch that
+#      is not checked out): no commit, no sync stamp. C29 is the same refusal with the variable
+#      UNSET, which is the pre-existing bug -- a session on a feature branch must not sync either.
+#      C30 is the positive control that keeps C28/C29 honest: pointed at the branch actually checked
+#      out, the commit happens again, and on that branch.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-Content "$sandTmp\claude_demand_sid28.txt" "PROJ-AAAA`n0`n" -Encoding utf8
+Set-Content "$sandbox\worklogs\PROJ-AAAA\scratch28.txt" "work" -Encoding utf8
+$head28 = (Invoke-Git -C $sandbox rev-parse HEAD) -join ''
+$env:WORKLOG_BRANCH = 'branch-that-is-not-checked-out'
+Invoke-Hook 'hook_session_log.ps1' 'sid28' | Out-Null
+Check 'C28 mismatch commits nothing' 'True'  ([string](((Invoke-Git -C $sandbox rev-parse HEAD) -join '') -eq $head28))
+Check 'C28 no sync stamp'            'False' ([string](Test-Path "$sandTmp\claude_worklog_sync.stamp"))
+$env:WORKLOG_BRANCH = $null
+
+Invoke-Git -C $sandbox checkout -q -b side29 | Out-Null
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-Content "$sandTmp\claude_demand_sid29.txt" "PROJ-AAAA`n0`n" -Encoding utf8
+$head29 = (Invoke-Git -C $sandbox rev-parse HEAD) -join ''
+Invoke-Hook 'hook_session_log.ps1' 'sid29' | Out-Null
+Check 'C29 default target refuses another branch' 'True' ([string](((Invoke-Git -C $sandbox rev-parse HEAD) -join '') -eq $head29))
+
+$env:WORKLOG_BRANCH = 'side29'
+Invoke-Hook 'hook_session_log.ps1' 'sid29' | Out-Null
+Check 'C30 configured branch commits' 'True'   ([string](((Invoke-Git -C $sandbox rev-parse HEAD) -join '') -ne $head29))
+Check 'C30 commit landed there'       'side29' ((Invoke-Git -C $sandbox branch --show-current) -join '')
+$env:WORKLOG_BRANCH = $null
+Invoke-Git -C $sandbox checkout -q main | Out-Null
+
+# ---------------------------------------------------------------------------
+# C31: the refusal is ANNOUNCED. A guard that silently stops committing is the failure mode it was
+#      meant to prevent, only quieter: the session would work a whole day and push nothing. The
+#      inject hook carries the notice in the same slot as the parallel-session conflict warning,
+#      which is first-message-only -- the right granularity, since the answer does not change
+#      mid-session. Paired with the control: with the variable unset there must be no warning at
+#      all, or the notice would become noise nobody reads.
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @()
+Set-Content $lastFile 'PROJ-AAAA' -Encoding utf8
+$env:WORKLOG_BRANCH = 'branch-that-is-not-checked-out'
+$out31 = Invoke-Hook 'hook_context_inject.ps1' 'sid31'
+$env:WORKLOG_BRANCH = $null
+Check 'C31 sync-off warning injected' 'True' ([string]($out31 -like '*worklog sync is OFF*'))
+
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-Content $lastFile 'PROJ-AAAA' -Encoding utf8
+$out31b = Invoke-Hook 'hook_context_inject.ps1' 'sid31b'
+Check 'C31 silent when branches match' 'False' ([string]($out31b -like '*worklog sync is OFF*'))
 
 # ---------------------------------------------------------------------------
 $env:WORKLOG_PATH = $null

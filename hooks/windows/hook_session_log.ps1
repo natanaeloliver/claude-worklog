@@ -204,6 +204,15 @@ if ($allFiles.Count -gt 0) {
 # tree, and two concurrent `git` processes on the same .git produce index.lock / rejected push /
 # stuck rebase. The mutex serializes add/commit/pull/push across sessions. High timeout (a push can
 # be slow); if it cannot acquire, proceed anyway -- better to sync without the lock than never.
+#
+# Nothing here runs unless HEAD is the branch WORKLOG_BRANCH names (`main` by default) -- see
+# scripts/sync_lib.ps1. The commit is skipped along with the push: the point of the variable is that
+# testing this tool must not drop auto-commits on a branch nobody asked for.
+. "$worklogRoot\scripts\sync_lib.ps1"   # Get-SyncTarget (WORKLOG_BRANCH, and the refusal to sync from another branch)
+$syncTarget = Get-SyncTarget -RepoPath $worklogRoot
+if (-not $syncTarget.Matches) { exit 0 }
+$syncBranch = $syncTarget.Branch
+
 $syncMutex = New-Object System.Threading.Mutex($false, "Global\ClaudeWorklogStateLock")
 $syncMutexAcquired = $false
 try {
@@ -235,9 +244,9 @@ try {
             Remove-Item $msgFile -Force -ErrorAction SilentlyContinue
         }
 
-        git pull --rebase origin main
+        git pull --rebase origin $syncBranch
         if ($LASTEXITCODE -eq 0) {
-            git push origin main
+            git push origin $syncBranch
         } else {
             git rebase --abort   # conflict with a teammate -- push waits for the next Stop
         }
