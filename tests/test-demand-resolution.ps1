@@ -585,6 +585,26 @@ $out31b = Invoke-Hook 'hook_context_inject.ps1' 'sid31b'
 Check 'C31 silent when branches match' 'False' ([string]($out31b -like '*worklog sync is OFF*'))
 
 # ---------------------------------------------------------------------------
+# C32: adding a ticket to an active_demands.txt that holds exactly ONE must leave TWO lines.
+#      Get-ActiveDemands returns @(...), but PowerShell unwraps a single-element array on return,
+#      so with one ticket in the file the caller got a String and `+` concatenated TEXT:
+#      "PROJ-AAAAPROJ-BBBB" on one line. Read RAW here, never through Get-ActiveDemands -- the
+#      self-healing read splits the blob back apart and would report success over a corrupt file,
+#      which is exactly why this went unnoticed until two live sessions hit it (2026-09-10).
+# ---------------------------------------------------------------------------
+Remove-Item "$sandTmp\claude_*" -Force -EA SilentlyContinue
+Set-ActiveDemands -Path $activeFile -Tickets @('PROJ-AAAA')
+Set-Content $lastFile 'PROJ-BBBB' -Encoding utf8
+Set-Content "$sandTmp\claude_demand_sidGhost32.txt" "PROJ-AAAA`n$PID`n$ownCreated" -Encoding utf8
+New-Item -ItemType File -Path "$sandTmp\claude_active_sidGhost32.flag" -Force | Out-Null
+
+Invoke-Hook 'hook_context_inject.ps1' 'sid32' | Out-Null
+$raw32 = @(([System.IO.File]::ReadAllText($activeFile) -split "?
+") | Where-Object { $_.Trim() })
+Check 'C32 two separate lines' '2'     ([string]$raw32.Count)
+Check 'C32 nothing glued'      'False' ([string]($raw32 -contains 'PROJ-AAAAPROJ-BBBB'))
+
+# ---------------------------------------------------------------------------
 $env:WORKLOG_PATH = $null
 $results | Format-Table -AutoSize
 $failed = @($results | Where-Object { $_.Status -eq 'FAIL' })

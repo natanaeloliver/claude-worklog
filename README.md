@@ -169,7 +169,7 @@ claude-worklog/
 │   ├── repos_lib.ps1                 # repos.conf read/write (paths + preferences)
 │   └── sync_lib.ps1                  # Which branch the hub syncs with (WORKLOG_BRANCH)
 ├── tests/
-│   └── test-demand-resolution.ps1    # 75 checks in an isolated sandbox
+│   └── test-demand-resolution.ps1    # 77 checks in an isolated sandbox
 ├── templates/
 │   ├── CONTEXT_template.md           # Demand context scaffold
 │   └── CLAUDE.md.template            # CLAUDE.md template for team repos
@@ -276,13 +276,14 @@ walk off with the ticket.
 powershell -NoProfile -File tests\test-demand-resolution.ps1
 ```
 
-75 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
+77 checks in a throwaway sandbox (`WORKLOG_PATH` and `TEMP` are redirected, so your real state is
 never touched): the demand resolution chain, the guard against reopening a demand that is already
 live, `Stop` refusing to log without a demand file, attribution by evidence, self-healing of a
 corrupted `active_demands.txt`, pruning of orphan entries, the window-bound reservation, session
 identity against a recycled PID, the per-turn commit message and sync stamp, `new-demand.ps1`
-leaving the resume point alone, ASCII-safe hook output, path resolution in `repos.conf`, and the
-refusal to sync from a branch other than the configured one.
+leaving the resume point alone, ASCII-safe hook output, path resolution in `repos.conf`, the
+refusal to sync from a branch other than the configured one, and `active_demands.txt` keeping one
+ticket per line when a second session claims one.
 Run it after changing any hook or script.
 
 Each known-bad case is paired with a positive control, so "fix everything by disabling the check"

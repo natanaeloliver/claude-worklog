@@ -346,10 +346,17 @@ if (-not $ticket) { return }
 # Register demand in this session's demand file (ticket + claude.exe PID + creation instant)
 Write-DemandFile -Path $demandFile -Ticket $ticket -Session $claudeSession
 
-# Add to active_demands.txt if not already there
+# Add to active_demands.txt if not already there.
+# @($lines) is load-bearing. Get-ActiveDemands returns @(...), but PowerShell UNWRAPS a
+# single-element array on return, so a file holding exactly ONE ticket arrives here as a String --
+# and with a String on the left, `+` concatenates TEXT instead of adding collections, writing
+# "PROJ-AAAAPROJ-BBBB" as a single line. That is the very corruption active_demands_lib.ps1 was
+# written to survive, produced by this line; the self-healing read then hid it (real case,
+# 2026-09-10, two live sessions). Same defect class as the glued file names fixed in
+# hook_session_log.ps1 -- the other two callers already wrapped both sides.
 $lines = Get-ActiveDemands -Path $activeFile -WorklogsDir "$worklogRoot\worklogs"
 if ($ticket -notin ($lines | ForEach-Object { $_.Trim() })) {
-    Set-ActiveDemands -Path $activeFile -Tickets ($lines + $ticket)
+    Set-ActiveDemands -Path $activeFile -Tickets (@($lines) + $ticket)
 }
 
 # Clean up legacy files from old approach (keyed by numeric PID)
